@@ -1,0 +1,67 @@
+# Changelog
+
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Nothing is released yet; everything below is unreleased initial work.
+
+## [Unreleased]
+
+### Added
+
+- `agentbox`: build a Linux VM through Apple `container`, run Claude Code headless in it against a bind-mounted directory, collect `REPORT.md`, delete the container. `--dry-run` prints the command instead.
+
+- `--proxy`: run the agent on an `--internal` network with no route off the host, and relay its API calls through a host-side proxy that holds the key. The container gets a per-run token. Chosen over passing the key in as an environment variable because the container otherwise has a live credential and unrestricted egress, which makes "sandbox" true of the filesystem only. The relay is not optional overhead: on an egress-blocked network it is the container's only path to the API, so it must exist regardless, and injecting the key there costs two lines.
+
+- `--allow-model` and `--max-tokens-cap`: model allowlist and token ceiling applied to request bodies at the relay. Enforced on the host, where the container cannot edit them, which is the point of doing it here rather than in the agent's flags.
+
+- `--log-bodies`: record every request body the agent sends upstream. A digest line per call plus full JSON under `--log-dir`, which defaults outside the bind mount so the agent cannot read or edit its own audit trail. Bodies carry the system prompt and the contents of every file read, so they are written to files rather than to the terminal.
+
+- Preflight validation of `ANTHROPIC_API_KEY` against the real endpoint before any container is created. A bad key inside the container costs 174s of SDK retry backoff before failing; the preflight rejects it in 0.27s.
+
+- Preflight warning when the macOS application firewall has the running interpreter set to "Block incoming connections". That configuration drops the container's connection to the relay with no error, so the first API call hangs until `--timeout`. The check reads `socketfilterfw --listapps`, matches the framework `Resources/Python.app` path that `sys.executable` does not resolve to, and prints the exact `--unblockapp` command.
+
+- `Makefile` and a pytest suite: 40 fast tests using a local fake upstream, 7 integration tests that boot real VMs. Neither makes an API call, so `make test` costs nothing and needs no key.
+
+### Changed
+
+- `agentbox.py` is now the `agentbox` package under `src/`, installed as an `agentbox` console script. The 762-line script had one module for the CLI, the relay, the Apple `container` calls, and the Claude Code flags, which is exactly the shape that makes a second container engine or a second agent an edit through the middle of it. The pre-package script is kept at `scripts/agentbox.py`, which still runs standalone through its PEP 723 header. It now embeds the Containerfile as a raw string and writes it to a temporary build context when `--containerfile` is absent, so a copied script needs nothing beside it; an explicit `--containerfile` that is missing is still an error rather than a silent fall back. `tests/test_script.py` keeps the embedded copy byte-identical to `agentbox/resources/Containerfile`.
+
+- Every call to a container engine moved behind `runtime.Runtime`, with `AppleContainer` the only implementation. `ContainerSpec` describes a container to run and `run_argv` renders it, so the placeholder container and the agent container go through the same code. A Docker or Podman subclass has to supply four things: the CLI name, the delete verb (`rm`, not `delete`), how `network inspect` reports the gateway, and whether the host bridge needs a placeholder container at all. Neither engine is installed here, so neither is written -- an untested backend is worse than an absent one.
+
+- The Containerfile ships as package data at `agentbox/resources/Containerfile`, and `--containerfile` defaults to it. Previously the default was the string `"Containerfile"`, resolved against the working directory, so the tool only built an image when run from a checkout.
+
+- `die()` became `AgentboxError`, and `main` returns an exit code instead of raising `SystemExit`. Library code that calls `sys.exit` cannot be embedded. The timeout path benefits directly: teardown caught `except SystemExit` and so also caught any unrelated `sys.exit` on the way out; it now catches the one exception it means.
+
+- One Makefile. The packaging frontend and the container frontend both defined `build`, `rebuild`, `test`, and `clean` with different meanings. Image targets are now `image` and `image-rebuild`; `build` is the Python one; `clean` deletes containers and build artifacts; `distclean` adds the resolved environment, `destroy` adds the image, network, and logs. Help is generated from `##` comments rather than a hand-maintained echo list that drifts.
+
+- pytest, ruff, and mypy configuration consolidated into `pyproject.toml`; `pytest.ini` deleted. Both files declared `testpaths`, and `pytest.ini` silently won.
+
+- `requires-python` raised to 3.11, matching what the PEP 723 header already declared.
+
+- Merged `keyproxy.py` into `agentbox.py`. The relay had no second consumer and no CLI of its own, and the split made `agentbox.py` fail with `ModuleNotFoundError` the moment it was copied anywhere without its sibling. Absolute-path and symlink invocation both happened to work, which is what made the failure easy to miss.
+
+- The relay binds the network's bridge gateway rather than `0.0.0.0`. The wildcard bind put it on Wi-Fi and LAN as well. Because vmnet only creates the bridge while a container is attached, a placeholder container now holds the network up long enough to bind, and is torn down with the run.
+
+- Dropped the relay's peer-subnet check. Once bound to the gateway it admitted the only caller class the bind does not already exclude: a host process reaching `192.168.128.1` presents source IP `192.168.128.1`, which is inside the subnet. Access control is the run token alone.
+
+- The task prompt is no longer written to `TASK.md` on the mount. The agent found its own instructions there as a file and spent two of six turns identifying them, and pointing `-w` at a real repository dropped a file into it. The prompt already arrives via `-p`.
+
+- Both scripts declare their interpreter with PEP 723 and `uv run --script`.
+
+### Fixed
+
+- Path allowlist matches `urlsplit(path).path` exactly instead of by prefix. Prefix matching admitted `/v1/models-internal-secret`; matching the raw path would have rejected `/v1/messages?beta=true`, which is what Claude Code actually calls. Both cases now have tests.
+
+- The relay reads upstream with `read1`. `read(n)` blocks until `n` bytes arrive, which stalled every server-sent event behind a 64KB buffer.
+
+- `--timeout` is enforced by a timer, not by a deadline checked inside the response loop. An agent that hangs without printing produces no lines, so the loop-checked deadline never fired.
+
+- Teardown catches `SystemExit` as well as `KeyboardInterrupt`. A timeout kill exits through `die()` and previously skipped the delete, leaving a container alive holding the key.
+
+- `validate_key` runs before the placeholder container is started. A rejected key used to leak that container.
+
+- The token summary counts `cache_creation_input_tokens` and `cache_read_input_tokens`. A run billed at $0.23 was reported as 10 input tokens; 74% of its input was cache reads.
+
+- `make clean` no longer deletes `agentbox-logs`. Recorded request bodies are evidence, not scratch; they move to `make destroy`, which reports the file count.
+
+- `make destroy` is idempotent and no longer prints `Error 1 (ignored)` when the image or network is already gone.
+
+- `make run` quotes `$(TASK)`. The default task is five words and was being split into five positional arguments.

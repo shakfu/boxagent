@@ -1,0 +1,62 @@
+[project]
+name = "agentbox"
+version = "0.1.0"
+description = "Run an agent inside a disposable container"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Shakeeb Alireza", email = "shakfu@users.noreply.github.com" }
+]
+requires-python = ">=3.11"
+keywords = ["agent", "claude", "container", "sandbox", "proxy"]
+# This project intentionally has no runtime dependencies.
+dependencies = []
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Typing :: Typed",
+]
+
+[project.scripts]
+agentbox = "agentbox.cli:main"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3.1",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.16.6",
+    "twine>=7.0.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.10,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "agentbox"
+module-root = "src"
+source-include = ["tests/**", "CHANGELOG.md", "LICENSE"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not container'"
+markers = [
+    "container: boots real containers; slow, needs the engine running",
+]
+
+[tool.ruff]
+src = ["src", "tests"]
+line-length = 90
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+strict = true

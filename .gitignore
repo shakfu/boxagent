@@ -1,3 +1,10 @@
+# macos
+.DS_Store
+
+# app
+work/
+agentbox-logs/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -203,8 +210,8 @@ cython_debug/
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
 
-# Ruff stuff:
-.ruff_cache/
+# cache:
+.*_cache/
 
 # PyPI configuration file
 .pypirc
@@ -216,3 +223,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# agentics
+.claude
+CLAUDE.md
+AGENT.md
+REVIEW.md

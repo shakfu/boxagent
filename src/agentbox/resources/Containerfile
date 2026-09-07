@@ -1,0 +1,18 @@
+FROM docker.io/library/node:22-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git ripgrep ca-certificates curl jq \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g @anthropic-ai/claude-code && npm cache clean --force
+
+# node:22-slim already ships uid 1000 as `node`; reuse it rather than adding one.
+RUN mkdir -p /work && chown node:node /work
+USER node
+ENV HOME=/home/node \
+    DISABLE_AUTOUPDATER=1 \
+    DISABLE_TELEMETRY=1 \
+    DISABLE_ERROR_REPORTING=1 \
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+WORKDIR /work
+ENTRYPOINT ["claude"]
