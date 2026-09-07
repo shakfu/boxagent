@@ -1,7 +1,7 @@
 FROM docker.io/library/node:22-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      git ripgrep ca-certificates curl jq \
+      git ripgrep ca-certificates curl jq python3 \
  && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @anthropic-ai/claude-code && npm cache clean --force

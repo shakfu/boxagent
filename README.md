@@ -18,6 +18,8 @@ In its stronger mode the VM has no route off the host and never holds the API ke
 
 Apple's `container` runs **Linux** containers as lightweight VMs. There is no such thing as a macOS container here; anything needing Xcode or the macOS toolchain cannot be the workload.
 
+The image is `node:22-slim` plus `git`, `ripgrep`, `curl`, `jq`, and `python3`. The agent can only run what is in it. Without an interpreter it falls back to hand-tracing and still writes a confident report, so check whether the findings say they were reproduced. There is no C, Go, or Rust toolchain: point `--image` at your own, or `--containerfile` at one to build.
+
 ## Quickstart
 
 ```
@@ -58,6 +60,8 @@ The default mode is filesystem isolation and nothing more. `--proxy` is where th
 4. The container is given `ANTHROPIC_BASE_URL` and a per-run token as its `ANTHROPIC_API_KEY`. Both arrive through the child process environment, so neither appears in `ps`, and `container inspect` shows the token, not the key.
 
 5. The relay checks the token, checks the path against an exact allowlist, applies any model or token policy, swaps in the real key, and streams the response back.
+
+6. Every relayed call logs its token counts: `in=`, `cache_write=`, `cache_read=`, `out=`. A `/v1/messages` call that reports none logs `usage=?` rather than a line that looks ordinary. The relay narrows the client's `Accept-Encoding` to `gzip` to read them, because the API answers in brotli whenever a client offers it and nothing in the standard library decodes brotli.
 
 ## Flags worth knowing
 
@@ -109,7 +113,7 @@ make system-start / system-stop / system-status
 
 ## Testing
 
-The fast suite makes no API calls and needs no key: the relay is exercised against a local fake upstream, and the preflight is monkeypatched. The integration suite boots real VMs and proves the relay by the 401 an invalid key earns from the real endpoint, which is itself proof the request arrived.
+The fast suite makes no API calls and needs no key: the relay is exercised against a local fake upstream, and the preflight is monkeypatched. `scripts/boxagent.py` carries its own copy of the relay, so a test compares every function the two share and fails on any difference outside a listed set of architectural ones. The integration suite boots real VMs and proves the relay by the 401 an invalid key earns from the real endpoint, which is itself proof the request arrived.
 
 ## Measured on this setup
 
@@ -118,6 +122,10 @@ The fast suite makes no API calls and needs no key: the relay is exercised again
 | Bad key, host preflight | 0.27s |
 | Bad key, no preflight | 174s of in-container retry backoff |
 | Agent run, 3 files, 7 turns | 35.4s wall, 23.2s of it upstream |
+| Review of one 59-line file, 10 turns | $0.55, 148s wall |
+| Claude Code's system prompt and tool schemas | 22,993 tokens |
+| That prefix written cold, as a share of one run | 25% of its cost |
+| The same prefix on a second run inside the cache TTL | read, not written: 23% cheaper |
 | Container direct egress on `boxagent-net` | `000` |
 | Real key present in container environment | 0 occurrences |
 

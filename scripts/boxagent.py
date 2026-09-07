@@ -27,6 +27,7 @@ import sys
 import tempfile
 import threading
 import time
+import zlib
 import urllib.error
 import urllib.request
 import secrets
@@ -45,7 +46,7 @@ REPORT_NAME = "REPORT.md"
 CONTAINERFILE = r"""FROM docker.io/library/node:22-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      git ripgrep ca-certificates curl jq \
+      git ripgrep ca-certificates curl jq python3 \
  && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @anthropic-ai/claude-code && npm cache clean --force
@@ -85,7 +86,10 @@ HOP = {
     "te", "trailer", "transfer-encoding", "upgrade",
 }
 # Credentials arriving from the container are dropped; we supply our own.
-STRIP_REQ = HOP | {"host", "x-api-key", "authorization", "content-length"}
+# accept-encoding is dropped and re-offered as gzip in `relay`: the API prefers
+# brotli when a client lists it, and nothing in the standard library decodes it.
+STRIP_REQ = HOP | {"host", "x-api-key", "authorization", "content-length",
+                   "accept-encoding"}
 STRIP_RESP = HOP | {"content-length"}
 
 
@@ -104,6 +108,71 @@ class Config:
         self.requests = 0
         self.rejected = 0
         self.lock = threading.Lock()
+
+
+
+class UsageSniffer:
+    """Token counts pulled from a relayed response.
+
+    Two shapes, because Claude Code uses both: server-sent events carry usage in
+    `message_start` and `message_delta`, and a plain JSON response carries it
+    once at the top level. Only SSE lines holding `"usage"` are parsed, so a
+    stream is still forwarded chunk by chunk; a JSON body has nothing to read
+    until it is whole, so it is buffered to `LIMIT` and parsed at the end.
+    """
+
+    LIMIT = 1 << 18
+
+    def __init__(self, content_type, content_encoding=""):
+        self.usage = {}
+        self._sse = "text/event-stream" in content_type
+        self._buf = b""
+        # wbits 47 reads the gzip header rather than assuming raw deflate.
+        self._unzip = zlib.decompressobj(47) if "gzip" in content_encoding.lower() else None
+
+    def feed(self, chunk):
+        if self._unzip is not None:
+            try:
+                chunk = self._unzip.decompress(chunk)
+            except zlib.error:
+                self._unzip = None
+                self._buf = b""
+                return
+            if not chunk:
+                return
+        if not self._sse:
+            if len(self._buf) < self.LIMIT:
+                self._buf += chunk
+            return
+        lines = (self._buf + chunk).split(b"\n")
+        self._buf = lines.pop()
+        for line in lines:
+            if line.startswith(b"data: ") and b'"usage"' in line:
+                self._take(line[6:])
+
+    def close(self):
+        if not self._sse and len(self._buf) < self.LIMIT:
+            self._take(self._buf)
+
+    def _take(self, raw):
+        try:
+            event = json.loads(raw)
+        except ValueError:
+            return
+        if not isinstance(event, dict):
+            return
+        message = event.get("message")
+        found = event.get("usage") or (message or {}).get("usage") or {}
+        self.usage.update({k: v for k, v in found.items() if isinstance(v, int)})
+
+    def digest(self, expected=False):
+        u = self.usage
+        if not u:
+            return " usage=?" if expected else ""
+        return (f" in={u.get('input_tokens', 0)}"
+                f" cache_write={u.get('cache_creation_input_tokens', 0)}"
+                f" cache_read={u.get('cache_read_input_tokens', 0)}"
+                f" out={u.get('output_tokens', 0)}")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -142,26 +211,27 @@ class Handler(BaseHTTPRequestHandler):
 
     def apply_policy(self, body):
         """Enforce model and token limits here, where the container cannot edit
-        them. Returns the body to send, or None if the request was refused."""
+        them. Returns (body to send, keep going). The flag is separate from the
+        body because a bodyless GET is allowed and also has no body to send."""
         cfg = self.cfg
         if not body or (cfg.allow_models is None and cfg.max_tokens_cap is None):
-            return body
+            return body, True
         if urlsplit(self.path).path != "/v1/messages":
-            return body
+            return body, True
         try:
             payload = json.loads(body)
         except json.JSONDecodeError:
             self.refuse(400, "body is not JSON")
-            return None
+            return None, False
         if cfg.allow_models is not None and payload.get("model") not in cfg.allow_models:
             self.refuse(403, f"model {payload.get('model')!r} not allowed")
-            return None
+            return None, False
         if cfg.max_tokens_cap is not None:
             asked = payload.get("max_tokens")
             if not isinstance(asked, int) or asked > cfg.max_tokens_cap:
                 payload["max_tokens"] = cfg.max_tokens_cap
-                return json.dumps(payload).encode()
-        return body
+                return json.dumps(payload).encode(), True
+        return body, True
 
     def log_body(self, body):
         """One digest line to stderr; the full body to a file if log_dir is set.
@@ -184,7 +254,8 @@ class Handler(BaseHTTPRequestHandler):
                   f"max_tokens={payload.get('max_tokens', '?')} "
                   f"effort={payload.get('output_config', {}).get('effort', '-')} "
                   f"msgs={len(payload.get('messages', []))} "
-                  f"tools={len(payload.get('tools', []))}")
+                  f"tools={len(payload.get('tools', []))} "
+            f"stream={payload.get('stream', False)}")
 
         if cfg.log_dir:
             path = os.path.join(cfg.log_dir, f"{seq:03d}.json")
@@ -201,8 +272,8 @@ class Handler(BaseHTTPRequestHandler):
 
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else None
-        body = self.apply_policy(body)
-        if body is None:
+        body, keep_going = self.apply_policy(body)
+        if not keep_going:
             return
         if cfg.log_bodies and body:
             self.log_body(body)
@@ -211,6 +282,13 @@ class Handler(BaseHTTPRequestHandler):
                    if k.lower() not in STRIP_REQ}
         headers["Host"] = cfg.upstream
         headers["x-api-key"] = cfg.api_key          # the only place the key appears
+        # Narrow the offer only for clients that already accept gzip; anything
+        # else is forwarded verbatim, so `identity` stays `identity`.
+        accepted = self.headers.get("accept-encoding", "")
+        if "gzip" in accepted.lower():
+            headers["Accept-Encoding"] = "gzip"
+        elif accepted:
+            headers["Accept-Encoding"] = accepted
         if body is not None:
             headers["Content-Length"] = str(len(body))
 
@@ -230,6 +308,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
 
+        sniffer = UsageSniffer(resp.getheader("Content-Type", ""),
+                               resp.getheader("Content-Encoding", ""))
         sent = 0
         try:
             while True:
@@ -241,8 +321,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(b"%x\r\n" % len(chunk) + chunk + b"\r\n")
                 self.wfile.flush()
                 sent += len(chunk)
+                sniffer.feed(chunk)
             self.wfile.write(b"0\r\n\r\n")
             self.wfile.flush()
+            sniffer.close()
         except (BrokenPipeError, ConnectionResetError):
             self.note("client hung up mid-stream")
         finally:
@@ -251,7 +333,8 @@ class Handler(BaseHTTPRequestHandler):
         with cfg.lock:
             cfg.requests += 1
         self.note(f"{self.client_address[0]} {self.command} {self.path} "
-                  f"-> {resp.status} {sent}B {time.monotonic() - started:.1f}s")
+                  f"-> {resp.status} {sent}B {time.monotonic() - started:.1f}s"
+                  f"{sniffer.digest(expected=urlsplit(self.path).path == '/v1/messages')}")
 
     do_GET = do_POST = do_DELETE = do_PUT = relay
 
