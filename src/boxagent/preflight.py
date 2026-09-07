@@ -12,9 +12,9 @@ import sys
 import urllib.error
 import urllib.request
 
-from agentbox.agent import KEY_ENV
-from agentbox.errors import AgentboxError
-from agentbox.util import run
+from boxagent.agent import KEY_ENV
+from boxagent.errors import AgentboxError
+from boxagent.util import run
 
 FIREWALL = "/usr/libexec/ApplicationFirewall/socketfilterfw"
 
@@ -62,7 +62,7 @@ def firewall_warning() -> None:
 
     target = blocked[0]
     print(
-        f"agentbox: WARNING the macOS firewall is on and\n"
+        f"boxagent: WARNING the macOS firewall is on and\n"
         f"  {target}\n"
         f"  is set to block incoming connections.\n"
         f"  The agent's calls to the proxy will hang until --timeout. Either\n"

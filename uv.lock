@@ -7,7 +7,7 @@ resolution-markers = [
 ]
 
 [[package]]
-name = "agentbox"
+name = "boxagent"
 version = "0.1.0"
 source = { editable = "." }
 

@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from agentbox import proxy
+from boxagent import proxy
 
 REAL_KEY = "sk-ant-api03-REAL-KEY-STAYS-ON-HOST"
 TOKEN = "run-token-for-tests"

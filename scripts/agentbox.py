@@ -36,12 +36,12 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 KEY_ENV = "ANTHROPIC_API_KEY"
-DEFAULT_IMAGE = "agentbox:latest"
+DEFAULT_IMAGE = "boxagent:latest"
 REPORT_NAME = "REPORT.md"
 
 # The image definition, embedded so this script builds its own image with
 # nothing beside it on disk. Kept byte-identical to
-# src/agentbox/resources/Containerfile; tests/test_script.py enforces that.
+# src/boxagent/resources/Containerfile; tests/test_script.py enforces that.
 CONTAINERFILE = r"""FROM docker.io/library/node:22-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -272,7 +272,7 @@ def start_proxy(api_key, token, host, port=0, allow_paths=DEFAULT_ALLOW,
 
 
 def die(msg, code=2):
-    print(f"agentbox: {msg}", file=sys.stderr)
+    print(f"boxagent: {msg}", file=sys.stderr)
     raise SystemExit(code)
 
 
@@ -335,7 +335,7 @@ def firewall_warning():
         return          # unlisted signed interpreters are auto-allowed
 
     target = blocked[0]
-    print(f"agentbox: WARNING the macOS firewall is on and\n"
+    print(f"boxagent: WARNING the macOS firewall is on and\n"
           f"  {target}\n"
           f"  is set to block incoming connections.\n"
           f"  The agent's calls to the proxy will hang until --timeout. Either\n"
@@ -380,7 +380,7 @@ def ensure_network(name):
     info = network_info(name)
     if info:
         return info
-    print(f"agentbox: creating internal network {name}", file=sys.stderr)
+    print(f"boxagent: creating internal network {name}", file=sys.stderr)
     r = run(["container", "network", "create", "--internal", name],
             capture_output=True)
     if r.returncode != 0:
@@ -398,7 +398,7 @@ def hold_network_up(network, image):
     attached to it. Without this the proxy cannot bind the gateway address and
     would have to fall back to 0.0.0.0, which puts it on Wi-Fi and LAN too.
     """
-    name = f"agentbox-hold-{uuid.uuid4().hex[:6]}"
+    name = f"boxagent-hold-{uuid.uuid4().hex[:6]}"
     r = run(["container", "run", "-d", "--name", name, "--network", network,
              "--cpus", "1", "--memory", "256M",
              "--entrypoint", "sleep", image, "86400"], capture_output=True)
@@ -445,7 +445,7 @@ def build_image(image, containerfile=None):
     error rather than a silent fall back to ours.
     """
     if containerfile is None:
-        with tempfile.TemporaryDirectory(prefix="agentbox-build-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="boxagent-build-") as tmp:
             cf = Path(tmp) / "Containerfile"
             cf.write_text(CONTAINERFILE)
             return _build(image, cf)
@@ -456,7 +456,7 @@ def build_image(image, containerfile=None):
 
 
 def _build(image, cf):
-    print(f"agentbox: building {image} from {cf}", file=sys.stderr)
+    print(f"boxagent: building {image} from {cf}", file=sys.stderr)
     r = run(["container", "build", "-t", image, "-f", str(cf), str(cf.parent)])
     if r.returncode != 0:
         die(f"build failed (exit {r.returncode})")
@@ -567,31 +567,31 @@ def launch(argv, timeout, quiet, env=None):
 
 def destroy(name, keep):
     if keep:
-        print(f"agentbox: keeping container {name} "
+        print(f"boxagent: keeping container {name} "
               f"(`container inspect {name}` exposes the API key; "
               f"`container delete {name}` when done)", file=sys.stderr)
         return
     run(["container", "stop", name], capture_output=True)
     r = run(["container", "delete", name], capture_output=True)
     if r.returncode != 0:
-        print(f"agentbox: could not delete {name}: {r.stderr.strip()}", file=sys.stderr)
+        print(f"boxagent: could not delete {name}: {r.stderr.strip()}", file=sys.stderr)
     else:
-        print(f"agentbox: deleted {name}", file=sys.stderr)
+        print(f"boxagent: deleted {name}", file=sys.stderr)
 
 
 # --- cli ---------------------------------------------------------------------
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
-        prog="agentbox",
+        prog="boxagent",
         description="Run a Claude Code agent in a disposable Apple `container` VM.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "The API key comes from the ANTHROPIC_API_KEY environment variable only.\n"
             "\n"
             "  export ANTHROPIC_API_KEY=sk-ant-...\n"
-            "  ./agentbox.py 'Summarise every .py file in this directory.' -w ./work\n"
-            "  ./agentbox.py --task-file brief.md -w ./repo --keep\n"
+            "  ./boxagent.py 'Summarise every .py file in this directory.' -w ./work\n"
+            "  ./boxagent.py --task-file brief.md -w ./repo --keep\n"
         ),
     )
     p.add_argument("task", nargs="?", help="the task prompt (or use --task-file)")
@@ -640,8 +640,8 @@ def parse_args(argv=None):
                    help="run the agent on an egress-blocked network and relay "
                         "its API calls through a host-side proxy that holds the "
                         "key. The container gets a per-run token instead.")
-    g.add_argument("--proxy-network", default="agentbox-net",
-                   help="internal network to create/use (default: agentbox-net)")
+    g.add_argument("--proxy-network", default="boxagent-net",
+                   help="internal network to create/use (default: boxagent-net)")
     g.add_argument("--proxy-port", type=int, default=0,
                    help="host port for the proxy (default: an ephemeral one)")
     g.add_argument("--proxy-allow-path", action="append",
@@ -654,9 +654,9 @@ def parse_args(argv=None):
     g.add_argument("--log-bodies", action="store_true",
                    help="record every request body the agent sends upstream: a "
                         "digest line per call, full JSON under --log-dir")
-    g.add_argument("--log-dir", type=Path, default=Path("./agentbox-logs"),
+    g.add_argument("--log-dir", type=Path, default=Path("./boxagent-logs"),
                    help="where --log-bodies writes full request JSON (default: "
-                        "./agentbox-logs). Deliberately outside the bind mount, "
+                        "./boxagent-logs). Deliberately outside the bind mount, "
                         "so the agent cannot read or edit its own audit trail.")
 
     g = p.add_argument_group("lifecycle")
@@ -696,7 +696,7 @@ def main(argv=None):
         validate_key(key, "https://api.anthropic.com" if args.proxy
                      else (args.base_url or "https://api.anthropic.com"))
 
-    name = f"agentbox-{uuid.uuid4().hex[:8]}"
+    name = f"boxagent-{uuid.uuid4().hex[:8]}"
     network, proxy_srv, port, holder = args.network, None, 0, None
     child_env = os.environ.copy()
 
@@ -718,7 +718,7 @@ def main(argv=None):
             if args.log_bodies:
                 log_dir = (args.log_dir / name).resolve()
                 log_dir.mkdir(parents=True, exist_ok=True)
-                print(f"agentbox: request bodies -> {log_dir}", file=sys.stderr)
+                print(f"boxagent: request bodies -> {log_dir}", file=sys.stderr)
             proxy_srv, port = start_proxy(
                 key, token, gateway, args.proxy_port,
                 allow_paths=args.proxy_allow_path or DEFAULT_ALLOW,
@@ -747,9 +747,9 @@ def main(argv=None):
         build_image(args.image, args.containerfile)
 
     if args.proxy:
-        print(f"agentbox: proxy bound to {gateway}:{port} (bridge only); "
+        print(f"boxagent: proxy bound to {gateway}:{port} (bridge only); "
               f"{network} has no route off the host", file=sys.stderr)
-    print(f"agentbox: {name} -> {workdir}", file=sys.stderr)
+    print(f"boxagent: {name} -> {workdir}", file=sys.stderr)
     started = time.monotonic()
     try:
         result, rc = launch(cmd, args.timeout, args.quiet, env=child_env)
@@ -764,36 +764,36 @@ def main(argv=None):
         if proxy_srv:
             proxy_srv.shutdown()
             c = proxy_srv.cfg
-            print(f"agentbox: proxy relayed {c.requests}, rejected {c.rejected}",
+            print(f"boxagent: proxy relayed {c.requests}, rejected {c.rejected}",
                   file=sys.stderr)
         if holder:
             destroy(holder, keep=False)
     destroy(name, args.keep)
 
     report = workdir / REPORT_NAME
-    print(f"\nagentbox: {time.monotonic() - started:.1f}s wall", file=sys.stderr)
+    print(f"\nboxagent: {time.monotonic() - started:.1f}s wall", file=sys.stderr)
     if result:
         u = result.get("usage", {})
         cached = u.get("cache_read_input_tokens", 0)
         total_in = (u.get("input_tokens", 0)
                     + u.get("cache_creation_input_tokens", 0) + cached)
-        print(f"agentbox: {result.get('num_turns', '?')} turns, "
+        print(f"boxagent: {result.get('num_turns', '?')} turns, "
               f"{total_in:,} in ({cached:,} cached) / "
               f"{u.get('output_tokens', 0):,} out, "
               f"${result.get('total_cost_usd', 0):.4f}", file=sys.stderr)
         if result.get("is_error"):
-            print(f"agentbox: agent reported an error: {result.get('result')}",
+            print(f"boxagent: agent reported an error: {result.get('result')}",
                   file=sys.stderr)
             return 1
 
     if report.is_file():
         if args.report:
             shutil.copy(report, args.report)
-            print(f"agentbox: report -> {args.report}", file=sys.stderr)
+            print(f"boxagent: report -> {args.report}", file=sys.stderr)
         else:
-            print(f"agentbox: report -> {report}", file=sys.stderr)
+            print(f"boxagent: report -> {report}", file=sys.stderr)
     else:
-        print(f"agentbox: the agent wrote no {REPORT_NAME}", file=sys.stderr)
+        print(f"boxagent: the agent wrote no {REPORT_NAME}", file=sys.stderr)
         if result and result.get("result"):
             print(f"\n{result['result']}")
     return 0 if rc == 0 else rc

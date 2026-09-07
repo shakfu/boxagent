@@ -6,9 +6,9 @@ Every run here is a --dry-run: nothing is built and nothing is started.
 
 import pytest
 
-from agentbox.agent import KEY_ENV, REPORT_NAME
-from agentbox.cli import main
-from agentbox.errors import AgentboxError
+from boxagent.agent import KEY_ENV, REPORT_NAME
+from boxagent.cli import main
+from boxagent.errors import AgentboxError
 
 KEY = "sk-ant-api03-SECRET"
 
@@ -67,5 +67,5 @@ def test_stale_report_is_removed_before_a_run(tmp_path):
     assert not stale.exists()
 
 
-def test_agentbox_error_carries_its_own_exit_code():
+def test_boxagent_error_carries_its_own_exit_code():
     assert AgentboxError("timed out", code=124).code == 124

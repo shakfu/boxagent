@@ -6,7 +6,7 @@ Ordered by how much they would change a decision, not by effort.
 
 - **`--allow-model` against live traffic.** Only ever exercised with synthetic requests. The bodies show `"model":"claude-opus-5"`, so it should pass, but that is inference from a log, not a measurement.
 
-- **Concurrent runs.** Each run gets its own token and ephemeral port but shares `agentbox-net`. Two agents at once is untested; so is one run's placeholder container being torn down while another run still needs the bridge.
+- **Concurrent runs.** Each run gets its own token and ephemeral port but shares `boxagent-net`. Two agents at once is untested; so is one run's placeholder container being torn down while another run still needs the bridge.
 
 - **A long run.** Everything measured so far finishes in ~35s. Nothing has hit `--timeout`, exhausted `--max-turns`, or run long enough to trigger context compaction.
 
@@ -34,7 +34,7 @@ Ordered by how much they would change a decision, not by effort.
 
 - **The placeholder container costs a VM boot and 256MB** for the duration of every `--proxy` run, purely so the bridge exists before the relay binds. Worth checking whether a shorter-lived container or a retrying bind would do.
 
-- **`agentbox-logs` grows without bound.** No rotation, no cap.
+- **`boxagent-logs` grows without bound.** No rotation, no cap.
 
 - **No container reuse.** Every run pays a fresh VM boot. Fine for the experiment; wrong if this ever runs in a loop.
 

@@ -6,7 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Nothing
 
 ### Added
 
-- `agentbox`: build a Linux VM through Apple `container`, run Claude Code headless in it against a bind-mounted directory, collect `REPORT.md`, delete the container. `--dry-run` prints the command instead.
+- `boxagent`: build a Linux VM through Apple `container`, run Claude Code headless in it against a bind-mounted directory, collect `REPORT.md`, delete the container. `--dry-run` prints the command instead.
 
 - `--proxy`: run the agent on an `--internal` network with no route off the host, and relay its API calls through a host-side proxy that holds the key. The container gets a per-run token. Chosen over passing the key in as an environment variable because the container otherwise has a live credential and unrestricted egress, which makes "sandbox" true of the filesystem only. The relay is not optional overhead: on an egress-blocked network it is the container's only path to the API, so it must exist regardless, and injecting the key there costs two lines.
 
@@ -22,11 +22,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Nothing
 
 ### Changed
 
-- `agentbox.py` is now the `agentbox` package under `src/`, installed as an `agentbox` console script. The 762-line script had one module for the CLI, the relay, the Apple `container` calls, and the Claude Code flags, which is exactly the shape that makes a second container engine or a second agent an edit through the middle of it. The pre-package script is kept at `scripts/agentbox.py`, which still runs standalone through its PEP 723 header. It now embeds the Containerfile as a raw string and writes it to a temporary build context when `--containerfile` is absent, so a copied script needs nothing beside it; an explicit `--containerfile` that is missing is still an error rather than a silent fall back. `tests/test_script.py` keeps the embedded copy byte-identical to `agentbox/resources/Containerfile`.
+- `boxagent.py` is now the `boxagent` package under `src/`, installed as an `boxagent` console script. The 762-line script had one module for the CLI, the relay, the Apple `container` calls, and the Claude Code flags, which is exactly the shape that makes a second container engine or a second agent an edit through the middle of it. The pre-package script is kept at `scripts/boxagent.py`, which still runs standalone through its PEP 723 header. It now embeds the Containerfile as a raw string and writes it to a temporary build context when `--containerfile` is absent, so a copied script needs nothing beside it; an explicit `--containerfile` that is missing is still an error rather than a silent fall back. `tests/test_script.py` keeps the embedded copy byte-identical to `boxagent/resources/Containerfile`.
 
 - Every call to a container engine moved behind `runtime.Runtime`, with `AppleContainer` the only implementation. `ContainerSpec` describes a container to run and `run_argv` renders it, so the placeholder container and the agent container go through the same code. A Docker or Podman subclass has to supply four things: the CLI name, the delete verb (`rm`, not `delete`), how `network inspect` reports the gateway, and whether the host bridge needs a placeholder container at all. Neither engine is installed here, so neither is written -- an untested backend is worse than an absent one.
 
-- The Containerfile ships as package data at `agentbox/resources/Containerfile`, and `--containerfile` defaults to it. Previously the default was the string `"Containerfile"`, resolved against the working directory, so the tool only built an image when run from a checkout.
+- The Containerfile ships as package data at `boxagent/resources/Containerfile`, and `--containerfile` defaults to it. Previously the default was the string `"Containerfile"`, resolved against the working directory, so the tool only built an image when run from a checkout.
 
 - `die()` became `AgentboxError`, and `main` returns an exit code instead of raising `SystemExit`. Library code that calls `sys.exit` cannot be embedded. The timeout path benefits directly: teardown caught `except SystemExit` and so also caught any unrelated `sys.exit` on the way out; it now catches the one exception it means.
 
@@ -36,7 +36,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Nothing
 
 - `requires-python` raised to 3.11, matching what the PEP 723 header already declared.
 
-- Merged `keyproxy.py` into `agentbox.py`. The relay had no second consumer and no CLI of its own, and the split made `agentbox.py` fail with `ModuleNotFoundError` the moment it was copied anywhere without its sibling. Absolute-path and symlink invocation both happened to work, which is what made the failure easy to miss.
+- Merged `keyproxy.py` into `boxagent.py`. The relay had no second consumer and no CLI of its own, and the split made `boxagent.py` fail with `ModuleNotFoundError` the moment it was copied anywhere without its sibling. Absolute-path and symlink invocation both happened to work, which is what made the failure easy to miss.
 
 - The relay binds the network's bridge gateway rather than `0.0.0.0`. The wildcard bind put it on Wi-Fi and LAN as well. Because vmnet only creates the bridge while a container is attached, a placeholder container now holds the network up long enough to bind, and is torn down with the run.
 
@@ -60,7 +60,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Nothing
 
 - The token summary counts `cache_creation_input_tokens` and `cache_read_input_tokens`. A run billed at $0.23 was reported as 10 input tokens; 74% of its input was cache reads.
 
-- `make clean` no longer deletes `agentbox-logs`. Recorded request bodies are evidence, not scratch; they move to `make destroy`, which reports the file count.
+- `make clean` no longer deletes `boxagent-logs`. Recorded request bodies are evidence, not scratch; they move to `make destroy`, which reports the file count.
 
 - `make destroy` is idempotent and no longer prints `Error 1 (ignored)` when the image or network is already gone.
 

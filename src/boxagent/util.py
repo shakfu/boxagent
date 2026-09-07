@@ -6,7 +6,7 @@ import subprocess
 import sys
 from typing import Any
 
-PROG = "agentbox"
+PROG = "boxagent"
 
 
 def run(cmd: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:

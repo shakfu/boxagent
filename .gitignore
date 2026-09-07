@@ -3,7 +3,7 @@
 
 # app
 work/
-agentbox-logs/
+boxagent-logs/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

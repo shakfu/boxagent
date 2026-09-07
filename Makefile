@@ -1,13 +1,13 @@
-# agentbox - run an agent in a disposable container.
+# boxagent - run an agent in a disposable container.
 #
 # Two families of targets: Python packaging (uv, ruff, mypy, pytest) and
 # container operations (image, network, cleanup). Override any variable on the
 # command line, e.g.
 #   make run TASK='Find the slowest test' WORK=../myrepo ARGS='--effort max'
 
-PKG     ?= agentbox
-IMAGE   ?= agentbox:latest
-NETWORK ?= agentbox-net
+PKG     ?= boxagent
+IMAGE   ?= boxagent:latest
+NETWORK ?= boxagent-net
 WORK    ?= ./work
 TASK    ?= Summarise every Python file here.
 ARGS    ?=
@@ -26,7 +26,7 @@ export IMAGE NETWORK
         stop clean distclean destroy system-start system-stop system-status
 
 help:  ## Show this help
-	@echo "agentbox targets:"
+	@echo "boxagent targets:"
 	@grep -hE '^[a-z][a-z-]*:.*?## ' $(MAKEFILE_LIST) \
 	  | awk -F':.*## ' '{printf "  %-16s %s\n", $$1, $$2}'
 	@echo
@@ -124,36 +124,36 @@ image-rebuild:  ## Rebuild the agent image unconditionally
 # --- running ----------------------------------------------------------------
 
 run:  ## Run the agent. TASK='...' WORK=./dir ARGS='--effort max'
-	@$(RUN) agentbox "$(TASK)" -w $(WORK) $(ARGS)
+	@$(RUN) boxagent "$(TASK)" -w $(WORK) $(ARGS)
 
 run-proxy:  ## Run with no egress and the key held on the host
-	@$(RUN) agentbox "$(TASK)" -w $(WORK) --proxy $(ARGS)
+	@$(RUN) boxagent "$(TASK)" -w $(WORK) --proxy $(ARGS)
 
 shell:  ## Interactive shell in the agent image (no network, nothing mounted)
 	$(ENGINE) run --rm -it --entrypoint sh $(IMAGE)
 
 # --- inspection -------------------------------------------------------------
 
-ps:  ## List every container, agentbox or not
+ps:  ## List every container, boxagent or not
 	@$(ENGINE) list -a
 
 logs:  ## Show recorded request bodies from --log-bodies runs
-	@ls -R agentbox-logs 2>/dev/null || echo "no logs (run with --log-bodies)"
+	@ls -R boxagent-logs 2>/dev/null || echo "no logs (run with --log-bodies)"
 
 # --- teardown ---------------------------------------------------------------
 
-# stop and clean match ^agentbox- only, so containers you named otherwise are
+# stop and clean match ^boxagent- only, so containers you named otherwise are
 # never touched.
 
-stop:  ## Stop running agentbox containers, leaving them on disk
-	@ids=$$($(ENGINE) list 2>/dev/null | awk 'NR>1 && $$1 ~ /^agentbox-/ {print $$1}'); \
+stop:  ## Stop running boxagent containers, leaving them on disk
+	@ids=$$($(ENGINE) list 2>/dev/null | awk 'NR>1 && $$1 ~ /^boxagent-/ {print $$1}'); \
 	if [ -n "$$ids" ]; then $(ENGINE) stop $$ids >/dev/null && echo stopped: $$ids; \
-	else echo "no running agentbox containers"; fi
+	else echo "no running boxagent containers"; fi
 
-clean: stop  ## Delete agentbox containers and build scratch. Keeps work/ and logs
-	@ids=$$($(ENGINE) list -a 2>/dev/null | awk 'NR>1 && $$1 ~ /^agentbox-/ {print $$1}'); \
+clean: stop  ## Delete boxagent containers and build scratch. Keeps work/ and logs
+	@ids=$$($(ENGINE) list -a 2>/dev/null | awk 'NR>1 && $$1 ~ /^boxagent-/ {print $$1}'); \
 	if [ -n "$$ids" ]; then $(ENGINE) delete --force $$ids >/dev/null && echo deleted: $$ids; \
-	else echo "no agentbox containers to delete"; fi
+	else echo "no boxagent containers to delete"; fi
 	@rm -rf build/ dist/ htmlcov/ .coverage .pytest_cache/
 	@rm -rf src/*.egg-info/ *.egg-info/
 	@find . -name "__pycache__" -type d -prune -exec rm -rf {} +
@@ -167,10 +167,10 @@ destroy: clean  ## clean, plus the image, the network, and recorded request bodi
 	  && echo "deleted image $(IMAGE)" || echo "no image $(IMAGE)"
 	@$(ENGINE) network delete $(NETWORK) >/dev/null 2>&1 \
 	  && echo "deleted network $(NETWORK)" || echo "no network $(NETWORK)"
-	@if [ -d agentbox-logs ]; then \
-	  n=$$(find agentbox-logs -name '*.json' | wc -l | tr -d ' '); \
-	  rm -rf agentbox-logs; echo "deleted agentbox-logs ($$n files)"; \
-	else echo "no agentbox-logs"; fi
+	@if [ -d boxagent-logs ]; then \
+	  n=$$(find boxagent-logs -name '*.json' | wc -l | tr -d ' '); \
+	  rm -rf boxagent-logs; echo "deleted boxagent-logs ($$n files)"; \
+	else echo "no boxagent-logs"; fi
 
 # --- container service ------------------------------------------------------
 
@@ -180,5 +180,5 @@ system-status:  ## Show whether the container service is running
 system-start:  ## Start the container service (registers it with launchd)
 	$(ENGINE) system start
 
-system-stop:  ## Stop the container service. NOTE: system-wide, not just agentbox
+system-stop:  ## Stop the container service. NOTE: system-wide, not just boxagent
 	$(ENGINE) system stop

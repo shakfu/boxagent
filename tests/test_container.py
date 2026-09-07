@@ -12,15 +12,15 @@ import subprocess
 
 import pytest
 
-from agentbox import proxy
-from agentbox.runtime import get_runtime, wait_for_gateway
-from agentbox.util import run
+from boxagent import proxy
+from boxagent.runtime import get_runtime, wait_for_gateway
+from boxagent.util import run
 
 pytestmark = pytest.mark.container
 
 ENGINE = get_runtime(os.environ.get("RUNTIME", "apple"))
-IMAGE = os.environ.get("IMAGE", "agentbox:latest")
-NETWORK = os.environ.get("NETWORK", "agentbox-net")
+IMAGE = os.environ.get("IMAGE", "boxagent:latest")
+NETWORK = os.environ.get("NETWORK", "boxagent-net")
 FAKE_KEY = "sk-ant-api03-REAL-KEY-STAYS-ON-HOST"
 
 
@@ -139,11 +139,11 @@ def test_relay_injects_the_key_and_reaches_the_real_endpoint(isolated_network):
         srv.shutdown()
 
 
-def test_no_agentbox_containers_are_left_behind():
+def test_no_boxagent_containers_are_left_behind():
     out = run([ENGINE.cli, "list", "-a"], capture_output=True)
     leftovers = [
         line.split()[0]
         for line in out.stdout.splitlines()[1:]
-        if line.startswith("agentbox-") and "hold" not in line.split()[0]
+        if line.startswith("boxagent-") and "hold" not in line.split()[0]
     ]
     assert leftovers == [], f"orphans: {leftovers}"

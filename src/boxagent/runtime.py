@@ -20,12 +20,12 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from agentbox.errors import AgentboxError
-from agentbox.util import note, run
+from boxagent.errors import AgentboxError
+from boxagent.util import note, run
 
-DEFAULT_IMAGE = "agentbox:latest"
+DEFAULT_IMAGE = "boxagent:latest"
 
-# Shipped inside the package so a `pip install agentbox` can build the image
+# Shipped inside the package so a `pip install boxagent` can build the image
 # without a checkout. __file__ rather than importlib.resources: the engine
 # needs a real path on disk for `build -f`, which a Traversable does not
 # promise.
@@ -114,7 +114,7 @@ class Runtime:
         if not self.needs_network_holder:
             return None
         spec = ContainerSpec(
-            name=f"agentbox-hold-{uuid.uuid4().hex[:6]}",
+            name=f"boxagent-hold-{uuid.uuid4().hex[:6]}",
             image=image,
             cpus=1,
             memory="256M",
