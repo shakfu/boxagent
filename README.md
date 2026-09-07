@@ -6,6 +6,8 @@ Today that means Claude Code on macOS through Apple's [`container`](https://gith
 
 In its stronger mode the VM has no route off the host and never holds the API key: a host-side relay injects the credential, and the container gets a per-run token that is worthless anywhere else.
 
+'sanduk' means 'box' in Arabic.
+
 ## Requirements
 
 - Mac with Apple silicon, macOS 26 or later (`container` requires both)
