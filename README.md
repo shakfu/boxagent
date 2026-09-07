@@ -22,7 +22,7 @@ The image is `node:22-slim` plus `git`, `ripgrep`, `curl`, `jq`, and `python3`. 
 
 ## Quickstart
 
-```
+```text
 make sync
 make image
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -31,7 +31,7 @@ make run TASK='Summarise every Python file here.' WORK=./work
 
 Or directly, which is where all the flags live:
 
-```
+```text
 uv run boxagent 'Summarise every Python file here.' -w ./work --proxy
 uv run boxagent --help
 ```
@@ -73,7 +73,7 @@ The default mode is filesystem isolation and nothing more. `--proxy` is where th
 
 ## Layout
 
-```
+```text
 src/boxagent/
     cli.py         flags, lifecycle, teardown
     runtime.py     container engines; ContainerSpec; only `apple` is implemented
@@ -90,7 +90,7 @@ A second engine is a `Runtime` subclass and a `RUNTIMES` entry. It must supply f
 
 `make help` lists all of them. The ones you need:
 
-```
+```text
 make sync             Resolve and install the environment
 make test             Fast suite: no containers, no API calls, no key needed
 make test-container   Integration suite: boots real containers
