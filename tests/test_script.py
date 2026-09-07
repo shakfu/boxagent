@@ -1,7 +1,7 @@
 """The standalone script embeds a copy of the Containerfile; this proves the
 two do not drift.
 
-scripts/boxagent.py predates the package and is kept runnable on its own, so it
+scripts/sanduk.py predates the package and is kept runnable on its own, so it
 carries the image definition inline rather than reading the packaged resource.
 Two copies of anything rot, and this one rots silently: a stale embedded copy
 still builds, just not the image the package builds.
@@ -12,11 +12,11 @@ import pathlib
 
 import pytest
 
-SCRIPT = pathlib.Path(__file__).parent.parent / "scripts" / "boxagent.py"
+SCRIPT = pathlib.Path(__file__).parent.parent / "scripts" / "sanduk.py"
 RESOURCE = (
     pathlib.Path(__file__).parent.parent
     / "src"
-    / "boxagent"
+    / "sanduk"
     / "resources"
     / "Containerfile"
 )
@@ -30,7 +30,7 @@ def embedded_containerfile():
             isinstance(t, ast.Name) and t.id == "CONTAINERFILE" for t in node.targets
         ):
             return ast.literal_eval(node.value)
-    raise AssertionError("scripts/boxagent.py defines no CONTAINERFILE")
+    raise AssertionError("scripts/sanduk.py defines no CONTAINERFILE")
 
 
 @pytest.mark.skipif(not SCRIPT.is_file(), reason="scripts/ is not in this tree")
@@ -60,7 +60,7 @@ ARCHITECTURAL = {
     "validate_key",
 }
 
-PACKAGE = pathlib.Path(__file__).parent.parent / "src" / "boxagent"
+PACKAGE = pathlib.Path(__file__).parent.parent / "src" / "sanduk"
 
 
 def _normalize(node):

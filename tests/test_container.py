@@ -12,15 +12,15 @@ import subprocess
 
 import pytest
 
-from boxagent import proxy
-from boxagent.runtime import get_runtime, wait_for_gateway
-from boxagent.util import run
+from sanduk import proxy
+from sanduk.runtime import get_runtime, wait_for_gateway
+from sanduk.util import run
 
 pytestmark = pytest.mark.container
 
 ENGINE = get_runtime(os.environ.get("RUNTIME", "apple"))
-IMAGE = os.environ.get("IMAGE", "boxagent:latest")
-NETWORK = os.environ.get("NETWORK", "boxagent-net")
+IMAGE = os.environ.get("IMAGE", "sanduk:latest")
+NETWORK = os.environ.get("NETWORK", "sanduk-net")
 FAKE_KEY = "sk-ant-api03-REAL-KEY-STAYS-ON-HOST"
 
 
@@ -144,6 +144,6 @@ def test_no_boxagent_containers_are_left_behind():
     leftovers = [
         line.split()[0]
         for line in out.stdout.splitlines()[1:]
-        if line.startswith("boxagent-") and "hold" not in line.split()[0]
+        if line.startswith("sanduk-") and "hold" not in line.split()[0]
     ]
     assert leftovers == [], f"orphans: {leftovers}"

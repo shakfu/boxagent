@@ -22,7 +22,7 @@ import time
 import uuid
 from pathlib import Path
 
-from boxagent.agent import (
+from sanduk.agent import (
     BASE_URL_ENV,
     KEY_ENV,
     REPORT_INSTRUCTION,
@@ -30,10 +30,10 @@ from boxagent.agent import (
     claude_argv,
     launch,
 )
-from boxagent.errors import AgentboxError
-from boxagent.preflight import firewall_warning, validate_key
-from boxagent.proxy import DEFAULT_ALLOW, ProxyServer, start_proxy
-from boxagent.runtime import (
+from sanduk.errors import AgentboxError
+from sanduk.preflight import firewall_warning, validate_key
+from sanduk.proxy import DEFAULT_ALLOW, ProxyServer, start_proxy
+from sanduk.runtime import (
     DEFAULT_CONTAINERFILE,
     DEFAULT_IMAGE,
     DEFAULT_RUNTIME,
@@ -42,22 +42,22 @@ from boxagent.runtime import (
     get_runtime,
     wait_for_gateway,
 )
-from boxagent.util import note
+from sanduk.util import note
 
 API_URL = "https://api.anthropic.com"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        prog="boxagent",
+        prog="sanduk",
         description="Run an agent in a disposable container.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "The API key comes from the ANTHROPIC_API_KEY environment variable only.\n"
             "\n"
             "  export ANTHROPIC_API_KEY=sk-ant-...\n"
-            "  boxagent 'Summarise every .py file in this directory.' -w ./work\n"
-            "  boxagent --task-file brief.md -w ./repo --keep\n"
+            "  sanduk 'Summarise every .py file in this directory.' -w ./work\n"
+            "  sanduk --task-file brief.md -w ./repo --keep\n"
         ),
     )
     p.add_argument("task", nargs="?", help="the task prompt (or use --task-file)")
@@ -145,8 +145,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     g.add_argument(
         "--proxy-network",
-        default="boxagent-net",
-        help="internal network to create/use (default: boxagent-net)",
+        default="sanduk-net",
+        help="internal network to create/use (default: sanduk-net)",
     )
     g.add_argument(
         "--proxy-port",
@@ -179,9 +179,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     g.add_argument(
         "--log-dir",
         type=Path,
-        default=Path("./boxagent-logs"),
+        default=Path("./sanduk-logs"),
         help="where --log-bodies writes full request JSON (default: "
-        "./boxagent-logs). Deliberately outside the bind mount, "
+        "./sanduk-logs). Deliberately outside the bind mount, "
         "so the agent cannot read or edit its own audit trail.",
     )
 
@@ -274,7 +274,7 @@ def run(args: argparse.Namespace) -> int:
         # Before anything is started, so a bad key cannot leak a container.
         validate_key(key, API_URL if args.proxy else (args.base_url or API_URL))
 
-    name = f"boxagent-{uuid.uuid4().hex[:8]}"
+    name = f"sanduk-{uuid.uuid4().hex[:8]}"
     network: str | None = args.network
     proxy_srv: ProxyServer | None = None
     holder: str | None = None
@@ -400,7 +400,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return run(parse_args(argv))
     except AgentboxError as e:
-        print(f"boxagent: {e}", file=sys.stderr)
+        print(f"sanduk: {e}", file=sys.stderr)
         return e.code
 
 

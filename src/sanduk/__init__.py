@@ -6,11 +6,11 @@ never holds the API key: a host-side relay injects the credential and the
 container gets a per-run token.
 """
 
-from boxagent.agent import KEY_ENV, REPORT_NAME
-from boxagent.cli import main
-from boxagent.errors import AgentboxError
-from boxagent.proxy import start_proxy
-from boxagent.runtime import ContainerSpec, Runtime, get_runtime
+from sanduk.agent import KEY_ENV, REPORT_NAME
+from sanduk.cli import main
+from sanduk.errors import AgentboxError
+from sanduk.proxy import start_proxy
+from sanduk.runtime import ContainerSpec, Runtime, get_runtime
 
 __all__ = [
     "KEY_ENV",

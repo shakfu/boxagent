@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from boxagent import preflight
-from boxagent.errors import AgentboxError
+from sanduk import preflight
+from sanduk.errors import AgentboxError
 
 KEY = "sk-ant-api03-SECRET"
 

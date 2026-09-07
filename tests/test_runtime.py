@@ -8,11 +8,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from boxagent import runtime
-from boxagent.agent import BASE_URL_ENV, KEY_ENV
-from boxagent.cli import build_spec, parse_args
-from boxagent.errors import AgentboxError
-from boxagent.runtime import ContainerSpec, get_runtime
+from sanduk import runtime
+from sanduk.agent import BASE_URL_ENV, KEY_ENV
+from sanduk.cli import build_spec, parse_args
+from sanduk.errors import AgentboxError
+from sanduk.runtime import ContainerSpec, get_runtime
 
 KEY = "sk-ant-api03-SECRET"
 
@@ -53,9 +53,9 @@ def test_non_proxy_run_sets_no_network_and_no_base_url(tmp_path):
 
 def test_proxy_run_adds_network_and_base_url(tmp_path):
     argv = argv_for(
-        "task", "-w", str(tmp_path), "--proxy", workdir=tmp_path, network="boxagent-net"
+        "task", "-w", str(tmp_path), "--proxy", workdir=tmp_path, network="sanduk-net"
     )
-    assert argv[argv.index("--network") + 1] == "boxagent-net"
+    assert argv[argv.index("--network") + 1] == "sanduk-net"
     assert BASE_URL_ENV in argv
 
 
@@ -81,9 +81,9 @@ def test_workdir_is_mounted_at_work(tmp_path):
 def test_the_network_holder_is_detached_and_runs_no_agent():
     """It exists only so vmnet creates the host bridge."""
     spec = ContainerSpec(
-        name="boxagent-hold-x",
-        image="boxagent:latest",
-        network="boxagent-net",
+        name="sanduk-hold-x",
+        image="sanduk:latest",
+        network="sanduk-net",
         detach=True,
         entrypoint="sleep",
         command=["86400"],
@@ -91,7 +91,7 @@ def test_the_network_holder_is_detached_and_runs_no_agent():
     argv = get_runtime().run_argv(spec)
     assert "-d" in argv
     assert "-v" not in argv
-    assert argv[-4:] == ["--entrypoint", "sleep", "boxagent:latest", "86400"]
+    assert argv[-4:] == ["--entrypoint", "sleep", "sanduk:latest", "86400"]
 
 
 # --- image listing ----------------------------------------------------------
@@ -100,14 +100,14 @@ def test_the_network_holder_is_detached_and_runs_no_agent():
 def test_image_exists_reads_the_listing(monkeypatch):
     listing = (
         "NAME      TAG      DIGEST\n"
-        "boxagent  latest   7429d9f6127f\n"
+        "sanduk  latest   7429d9f6127f\n"
         "alpine    3.20     d9e853e87e55\n"
     )
     monkeypatch.setattr(
         runtime, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=listing)
     )
     engine = get_runtime()
-    assert engine.image_exists("boxagent:latest")
-    assert engine.image_exists("boxagent") is True  # tag defaults to latest
-    assert not engine.image_exists("boxagent:test")
+    assert engine.image_exists("sanduk:latest")
+    assert engine.image_exists("sanduk") is True  # tag defaults to latest
+    assert not engine.image_exists("sanduk:test")
     assert not engine.image_exists("missing:latest")

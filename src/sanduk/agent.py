@@ -12,7 +12,7 @@ import subprocess
 import threading
 from typing import Any
 
-from boxagent.errors import AgentboxError
+from sanduk.errors import AgentboxError
 
 KEY_ENV = "ANTHROPIC_API_KEY"
 BASE_URL_ENV = "ANTHROPIC_BASE_URL"

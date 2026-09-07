@@ -6,9 +6,9 @@ Every run here is a --dry-run: nothing is built and nothing is started.
 
 import pytest
 
-from boxagent.agent import KEY_ENV, REPORT_NAME
-from boxagent.cli import main
-from boxagent.errors import AgentboxError
+from sanduk.agent import KEY_ENV, REPORT_NAME
+from sanduk.cli import main
+from sanduk.errors import AgentboxError
 
 KEY = "sk-ant-api03-SECRET"
 
