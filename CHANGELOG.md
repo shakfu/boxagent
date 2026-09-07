@@ -4,6 +4,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Nothing
 
 ## [Unreleased]
 
+## [0.1.0]
+
 ### Added
 
 - `sanduk`: build a Linux VM through Apple `container`, run Claude Code headless in it against a bind-mounted directory, collect `REPORT.md`, delete the container. `--dry-run` prints the command instead.
