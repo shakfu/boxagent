@@ -39,6 +39,7 @@ VERSION_MARKER = {
     "codex": r"codex-cli",
     "hax": r"hax",
     "opencode": r"\d+\.\d+\.\d+",
+    "pi": r"\d+\.\d+\.\d+",
 }
 
 

@@ -16,6 +16,7 @@ from sanduk.agents.claude import ClaudeCode
 from sanduk.agents.codex import Codex
 from sanduk.agents.hax import Hax
 from sanduk.agents.opencode import OpenCode
+from sanduk.agents.pi import Pi
 from sanduk.errors import AgentboxError
 from sanduk.providers import get_provider
 
@@ -44,7 +45,7 @@ def flags(**kw) -> argparse.Namespace:
 def test_the_shipped_handlers_are_found_without_install_metadata():
     """A source checkout has no entry points; losing claude there would be the
     worst possible failure mode, so the built-ins are seeded directly."""
-    assert set(agent_names()) >= {"claude", "codex", "hax", "opencode"}
+    assert set(agent_names()) >= {"claude", "codex", "hax", "opencode", "pi"}
     assert registry()["claude"] is ClaudeCode
 
 
@@ -524,3 +525,167 @@ def test_opencode_sums_the_per_step_token_counts():
 
 def test_no_step_means_no_outcome():
     assert drain(OpenCode().reader(), [{"type": "step_start", "part": {}}]) is None
+
+
+# --- pi ---------------------------------------------------------------------
+
+
+def test_pi_reaches_every_provider():
+    for name in ("anthropic", "openai", "openrouter", "openai-compat"):
+        Pi().check(flags(agent="pi", model="m"), get_provider(name))
+
+
+def test_pi_needs_a_model():
+    """The provider block lists the models pi may select and --model picks one
+    out of it; neither has anything to hold without a name."""
+    with pytest.raises(AgentboxError, match="--model is required"):
+        Pi().check(flags(agent="pi"), get_provider("openai"))
+
+
+def test_the_pi_config_travels_in_the_environment():
+    """Not a file: models.json under the bind mount would sit in the user's
+    repository and be editable by the agent that reads it."""
+    wiring = Pi().wire(flags(agent="pi", model="m"), get_provider("openai"), RELAY)
+    config = json.loads(wiring.env["SANDUK_PI_MODELS"])
+    provider = config["providers"]["sanduk"]
+    assert provider["baseUrl"] == "http://10.0.0.1:9/v1"
+    assert provider["models"] == [{"id": "m"}]
+
+
+def test_the_pi_config_carries_no_credential():
+    wiring = Pi().wire(flags(agent="pi", model="m"), get_provider("openai"), RELAY)
+    assert f"${wiring.key_env}" in wiring.env["SANDUK_PI_MODELS"]
+    assert wiring.key_env == "PI_RELAY_KEY"
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected"),
+    [
+        ("anthropic", "anthropic-messages"),
+        ("openai", "openai-completions"),
+        ("openrouter", "openai-completions"),
+        ("openai-compat", "openai-completions"),
+    ],
+)
+def test_pi_names_the_api_its_provider_speaks(provider, expected):
+    """Chat Completions wins where a provider serves it and Responses both: it
+    is the route every OpenAI-shaped provider here has."""
+    wiring = Pi().wire(flags(agent="pi", model="m"), get_provider(provider), RELAY)
+    config = json.loads(wiring.env["SANDUK_PI_MODELS"])
+    assert config["providers"]["sanduk"]["api"] == expected
+
+
+def test_pi_gets_the_bare_root_for_anthropic():
+    """Measured: pi appends /v1/messages itself, so a base ending in /v1 sent it
+    to /v1/v1/messages and the relay refused the path."""
+    wiring = Pi().wire(flags(agent="pi", model="m"), get_provider("anthropic"), RELAY)
+    config = json.loads(wiring.env["SANDUK_PI_MODELS"])
+    assert config["providers"]["sanduk"]["baseUrl"] == RELAY
+
+
+def test_pi_selects_the_model_through_its_own_provider_id():
+    argv = argv_of(Pi(), flags(agent="pi", model="qwen3"), get_provider("openai"))
+    assert "sanduk/qwen3" in argv
+
+
+def test_a_pi_task_survives_a_leading_dash():
+    """The task is a positional, so it goes after --."""
+    argv = argv_of(Pi(), flags(agent="pi", model="m"), get_provider("openai"), "--help")
+    assert argv[-2:] == ["--", "--help"]
+
+
+def test_pi_counts_the_cache_inside_input():
+    """`input` excludes the cache: input 19 beside cacheRead 1754 on one
+    message. The run's input is the sum of the three."""
+    outcome = drain(
+        Pi().reader(),
+        [
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "done"}],
+                    "usage": {
+                        "input": 19,
+                        "output": 131,
+                        "cacheRead": 1754,
+                        "cacheWrite": 0,
+                        "cost": {"total": 0.25},
+                    },
+                },
+            },
+            {"type": "agent_end", "willRetry": False},
+        ],
+    )
+    assert outcome is not None and outcome.ok
+    assert outcome.text == "done"
+    assert outcome.stats == "1,773 in (1,754 cached) / 131 out, $0.2500"
+
+
+def test_pi_reads_the_assistants_text_and_no_one_elses():
+    """The user message and every tool result arrive as message_end too."""
+    reader = Pi().reader()
+    for role, text in (("user", "the task"), ("toolResult", "file contents")):
+        reader.event(
+            {
+                "type": "message_end",
+                "message": {"role": role, "content": [{"type": "text", "text": text}]},
+            },
+            quiet=True,
+        )
+    reader.event({"type": "agent_end", "willRetry": False}, quiet=True)
+    outcome = reader.finish()
+    assert outcome is not None and outcome.text == ""
+
+
+def test_a_pi_retry_is_not_the_end_of_the_run():
+    """pi ends an agent per failed attempt and retries up to three times."""
+    assert drain(Pi().reader(), [{"type": "agent_end", "willRetry": True}]) is None
+
+
+def test_a_pi_provider_error_is_not_ok():
+    outcome = drain(
+        Pi().reader(),
+        [
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [],
+                    "stopReason": "error",
+                    "errorMessage": "API key is invalid.",
+                },
+            },
+            {"type": "agent_settled"},
+        ],
+    )
+    assert outcome is not None and not outcome.ok
+    assert outcome.error == "API key is invalid."
+
+
+def test_a_pi_retry_that_lands_clears_the_attempt_that_did_not():
+    outcome = drain(
+        Pi().reader(),
+        [
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [],
+                    "stopReason": "error",
+                    "errorMessage": "Connection error.",
+                },
+            },
+            {"type": "agent_end", "willRetry": True},
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "hello"}],
+                    "usage": {"input": 5, "output": 2},
+                },
+            },
+            {"type": "agent_end", "willRetry": False},
+        ],
+    )
+    assert outcome is not None and outcome.ok and outcome.text == "hello"

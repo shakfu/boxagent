@@ -4,6 +4,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Nothing
 
 ## [Unreleased]
 
+### Added
+
+- `--agent pi`. pi speaks Anthropic Messages, OpenAI Chat Completions and OpenAI Responses, so it reaches every provider; the provider block names which with an `api` field, preferring Chat Completions where both are served. Its endpoint is neither a variable nor a flag but a `models.json` in its config directory, so the image's entrypoint writes that file from `SANDUK_PI_MODELS` and execs pi -- a config in the bind mount would sit in the user's repository, editable by the agent reading it. `--model` is required, since the provider block lists what pi may select. With `anthropic` the base URL is the bare root: pi appends `/v1/messages` itself, and a base ending in `/v1` reached the relay as `/v1/v1/messages`, which it refused.
+
 ## [0.2.1]
 
 ### Added

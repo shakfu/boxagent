@@ -1,6 +1,6 @@
 # Agent handlers
 
-sanduk runs one agent CLI inside the container and reads its JSON stream. What that CLI is, how it is driven, and how its output is parsed live in a handler. Four ship: `claude`, `codex`, `hax` and `opencode`. A fifth is a class you write, in your own package.
+sanduk runs one agent CLI inside the container and reads its JSON stream. What that CLI is, how it is driven, and how its output is parsed live in a handler. Five ship: `claude`, `codex`, `hax`, `opencode` and `pi`. A sixth is a class you write, in your own package.
 
 ## What a handler answers
 
@@ -80,7 +80,7 @@ A plugin that fails to import is reported and skipped, and one that claims a shi
 
 **The base URL prefix is yours to add.** The relay forwards paths unchanged and checks them against `Provider.routes`, so the base URL you hand the agent has to end where those routes begin. `provider.api_prefix` is that segment: `/v1` for most, `/api/v1` for OpenRouter. Claude Code is the exception that proves it — it appends `/v1/messages` itself, so its handler passes the bare root.
 
-**Not every agent reads its endpoint from a variable.** codex takes it as a `-c` config override in `argv`; opencode takes a whole JSON config through `OPENCODE_CONFIG_CONTENT`. That is why `argv` is handed the run's `Wiring`. The credential still travels in `Wiring.key_env` and is named, not inlined, in either: `argv` is visible to `inspect`, and a config file written into the bind mount would be editable by the agent reading it.
+**Not every agent reads its endpoint from a variable.** codex takes it as a `-c` config override in `argv`; opencode takes a whole JSON config through `OPENCODE_CONFIG_CONTENT`; pi reads a `models.json` its image's entrypoint writes from one. That is why `argv` is handed the run's `Wiring`. The credential still travels in `Wiring.key_env` and is named, not inlined, in either: `argv` is visible to `inspect`, and a config file written into the bind mount would be editable by the agent reading it.
 
 **A handler is stateless; a reader is not.** The registry holds handler classes and `launch` calls `reader()` once per run. Keep the token tally and the final record on the reader, or one run's counts leak into the next.
 

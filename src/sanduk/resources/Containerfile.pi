@@ -1,0 +1,38 @@
+# pi ships as an npm package. Pinned: an unpinned agent changes what runs in
+# the container without a commit here.
+FROM docker.io/library/node:22-slim
+
+ARG PI_VERSION=0.85.1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git ripgrep ca-certificates curl jq python3 \
+ && rm -rf /var/lib/apt/lists/*
+
+# --ignore-scripts is what pi's own containerization doc installs with.
+RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_VERSION} \
+ && npm cache clean --force
+
+# pi reads its provider from a file in its config directory, and sanduk knows
+# the relay's address only at run time. The entrypoint writes the file from the
+# environment, so the config never touches the bind mount, where it would sit in
+# the user's repository and be editable by the agent reading it.
+RUN printf '%s\n' \
+      '#!/bin/sh' \
+      'set -e' \
+      'if [ -n "$SANDUK_PI_MODELS" ]; then' \
+      '  mkdir -p "$PI_CODING_AGENT_DIR"' \
+      '  printf %s "$SANDUK_PI_MODELS" > "$PI_CODING_AGENT_DIR/models.json"' \
+      'fi' \
+      'exec pi "$@"' \
+    > /usr/local/bin/sanduk-pi \
+ && chmod +x /usr/local/bin/sanduk-pi
+
+RUN mkdir -p /work && chown node:node /work
+USER node
+ENV HOME=/home/node \
+    PI_CODING_AGENT_DIR=/home/node/.pi/agent \
+    PI_OFFLINE=1 \
+    PI_SKIP_VERSION_CHECK=1 \
+    PI_TELEMETRY=0
+WORKDIR /work
+ENTRYPOINT ["sanduk-pi"]
