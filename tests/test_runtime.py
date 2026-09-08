@@ -10,7 +10,7 @@ import pytest
 
 from sanduk import runtime
 from sanduk.agent import BASE_URL_ENV, KEY_ENV
-from sanduk.cli import build_spec, parse_args
+from sanduk.cli import build_spec, parse_args, relay_root, select
 from sanduk.errors import AgentboxError
 from sanduk.runtime import ContainerSpec, get_runtime
 
@@ -19,7 +19,11 @@ KEY = "sk-ant-api03-SECRET"
 
 def argv_for(*flags, workdir, network=None):
     args = parse_args(list(flags))
-    return get_runtime().run_argv(build_spec(args, "n", workdir, "task", network))
+    sel = select(args)
+    wiring = sel.agent.wire(args, sel.provider, relay_root(args))
+    return get_runtime().run_argv(
+        build_spec(args, sel, wiring, "n", workdir, "task", network)
+    )
 
 
 # --- registry ---------------------------------------------------------------

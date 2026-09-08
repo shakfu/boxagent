@@ -79,9 +79,25 @@ sanduk 'Review this.' -w ./repo --proxy \
 
 `--upstream` takes `scheme://host:port` and no path. Plaintext `http://` to anything but a loopback address is refused, because the relay writes the real key into every forwarded request; `--insecure-upstream` overrides. OpenRouter's `/api/v1` prefix lives in the allowlist, not the upstream.
 
-The relay only forwards. It does not translate between protocols, so the agent has to speak the provider's own API. Claude Code speaks Anthropic Messages and will not talk to OpenRouter whatever the relay does. To use one anyway, run a gateway that presents an Anthropic-shaped API on the host and point `--upstream` at that.
+The relay only forwards. It does not translate between protocols, so the agent has to speak the provider's own API. Claude Code speaks Anthropic Messages only, so `--provider openai|openrouter|openai-compat` needs `--agent hax`; the pairing is refused before anything is built rather than 404'd by the relay later.
 
 `--agent-key-env` and `--agent-base-url-env` name the variables the agent reads inside the container. They default to the provider's. They are separate because sanduk reads the key on the host under one name and the container may want another, which is what makes an arbitrary agent a matter of two flags rather than a new module.
+
+## Agents
+
+```text
+--agent claude   Claude Code       anthropic only
+--agent hax      hax               every provider
+```
+
+A handler says which image carries the agent, what flags drive it headlessly, which variables it reads its endpoint from, and how to read its JSON stream. Nothing else about a run differs, so a third agent is a class in your own package, advertised in the `sanduk.agents` entry-point group or named directly as `--agent mypkg.handlers:MyAgent`. See [docs/agents.md](docs/agents.md).
+
+```text
+sanduk 'Review this.' -w ./repo --proxy --agent hax \
+    --provider openrouter --model anthropic/claude-sonnet-5
+```
+
+hax is a static C binary with no approval gate, which suits a container that is already the boundary. The image carries no language runtime. `--allowed-tools` and `--permission-mode` are Claude Code flags and are refused rather than dropped.
 
 ## How --proxy works
 
@@ -112,14 +128,16 @@ src/sanduk/
     cli.py         flags, lifecycle, teardown
     runtime.py     container engines; ContainerSpec; only `apple` is implemented
     providers.py   provider records, wire protocols, route tables
-    agent.py       the agent CLI inside the container; only Claude Code
+    agent.py       the agent strategy: interface, registry, plugin loading
+    agents/        the shipped handlers: claude.py, hax.py
     proxy.py       the host-side relay
     preflight.py   key validation, macOS firewall check
     resources/
-        Containerfile
+        Containerfile.claude
+        Containerfile.hax
 ```
 
-A second engine is a `Runtime` subclass and a `RUNTIMES` entry. It must supply four things: the CLI name, the verb that deletes a container (`rm`, not `delete`), how `network inspect` reports the gateway, and whether the host bridge needs a placeholder container to exist at all.
+A second agent is an `Agent` subclass in any package; see [docs/agents.md](docs/agents.md). A second engine is a `Runtime` subclass and a `RUNTIMES` entry. It must supply four things: the CLI name, the verb that deletes a container (`rm`, not `delete`), how `network inspect` reports the gateway, and whether the host bridge needs a placeholder container to exist at all.
 
 ## Make targets
 

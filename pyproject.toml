@@ -26,6 +26,13 @@ classifiers = [
 [project.scripts]
 sanduk = "sanduk.cli:main"
 
+# The shipped handlers are seeded directly by sanduk.agent.registry, so a source
+# checkout works uninstalled. They are declared here too, as the worked example
+# a third-party handler copies.
+[project.entry-points."sanduk.agents"]
+claude = "sanduk.agents.claude:ClaudeCode"
+hax = "sanduk.agents.hax:Hax"
+
 [dependency-groups]
 dev = [
     "mypy>=2.3.1",

@@ -6,7 +6,8 @@
 #   make run TASK='Find the slowest test' WORK=../myrepo ARGS='--effort max'
 
 PKG     ?= sanduk
-IMAGE   ?= sanduk:latest
+AGENT   ?= claude
+IMAGE   ?= $(if $(filter hax,$(AGENT)),sanduk-hax:latest,sanduk:latest)
 NETWORK ?= sanduk-net
 WORK    ?= ./work
 TASK    ?= Summarise every Python file here.
@@ -14,7 +15,7 @@ ARGS    ?=
 UV      ?= uv
 RUN     ?= $(UV) run
 ENGINE  ?= container
-CONTAINERFILE = src/$(PKG)/resources/Containerfile
+CONTAINERFILE = src/$(PKG)/resources/Containerfile.$(AGENT)
 
 export IMAGE NETWORK
 
@@ -30,7 +31,7 @@ help:  ## Show this help
 	@grep -hE '^[a-z][a-z-]*:.*?## ' $(MAKEFILE_LIST) \
 	  | awk -F':.*## ' '{printf "  %-16s %s\n", $$1, $$2}'
 	@echo
-	@echo "Variables: IMAGE=$(IMAGE) NETWORK=$(NETWORK) WORK=$(WORK)"
+	@echo "Variables: AGENT=$(AGENT) IMAGE=$(IMAGE) NETWORK=$(NETWORK) WORK=$(WORK)"
 
 # --- python environment -----------------------------------------------------
 
@@ -126,11 +127,11 @@ image-rebuild:  ## Rebuild the agent image unconditionally
 
 # --- running ----------------------------------------------------------------
 
-run:  ## Run the agent. TASK='...' WORK=./dir ARGS='--effort max'
-	@$(RUN) sanduk "$(TASK)" -w $(WORK) $(ARGS)
+run:  ## Run the agent. TASK='...' WORK=./dir AGENT=hax ARGS='--effort max'
+	@$(RUN) sanduk "$(TASK)" -w $(WORK) --agent $(AGENT) $(ARGS)
 
 run-proxy:  ## Run with no egress and the key held on the host
-	@$(RUN) sanduk "$(TASK)" -w $(WORK) --proxy $(ARGS)
+	@$(RUN) sanduk "$(TASK)" -w $(WORK) --agent $(AGENT) --proxy $(ARGS)
 
 shell:  ## Interactive shell in the agent image (no network, nothing mounted)
 	$(ENGINE) run --rm -it --entrypoint sh $(IMAGE)

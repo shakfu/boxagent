@@ -19,7 +19,7 @@ RESOURCE = (
     / "src"
     / "sanduk"
     / "resources"
-    / "Containerfile"
+    / "Containerfile.claude"
 )
 
 

@@ -95,6 +95,10 @@ class Provider:
     routes: Mapping[str, str | None]
     key_env: str
     base_url_env: str
+    # The path prefix every route shares. An agent that is handed a base URL
+    # rather than building one from a pinned host needs it, or its requests
+    # land off `routes` and the relay rejects them.
+    api_prefix: str = "/v1"
     auth_header: str = "x-api-key"
     # "Bearer" for OpenAI-shaped providers, "" when the header holds the bare
     # credential. Applies to the token the container presents and to the key
@@ -196,6 +200,7 @@ OPENROUTER_PROVIDER = Provider(
     },
     key_env="OPENROUTER_API_KEY",
     base_url_env="OPENROUTER_BASE_URL",
+    api_prefix="/api/v1",
     auth_header="authorization",
     auth_scheme="Bearer",
     validate_path="/api/v1/key",

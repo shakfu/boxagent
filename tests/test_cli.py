@@ -91,21 +91,23 @@ def all_keys(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("provider", "expected"),
+    ("agent", "provider", "expected"),
     [
-        ("anthropic", "ANTHROPIC_API_KEY"),
-        ("openai", "OPENAI_API_KEY"),
-        ("openrouter", "OPENROUTER_API_KEY"),
+        ("claude", "anthropic", "ANTHROPIC_API_KEY"),
+        ("hax", "openai", "OPENAI_API_KEY"),
+        ("hax", "openrouter", "OPENROUTER_API_KEY"),
     ],
 )
-def test_the_provider_decides_which_key_is_read(monkeypatch, provider, expected, capsys):
+def test_the_provider_decides_which_key_is_read(
+    monkeypatch, agent, provider, expected, capsys
+):
     """With the other two still exported, removing the provider's own key must
     fail. Falling back to whichever key happens to be set would send the wrong
     credential to the wrong API."""
     for name, value in ALL_KEYS.items():
         monkeypatch.setenv(name, value)
     monkeypatch.delenv(expected)
-    assert main(["task", "--provider", provider]) == 2
+    assert main(["task", "--agent", agent, "--provider", provider]) == 2
     assert expected in capsys.readouterr().err
 
 
@@ -119,6 +121,8 @@ def test_openai_compat_runs_without_any_key(monkeypatch, tmp_path, capsys):
             "-w",
             str(tmp_path),
             "--dry-run",
+            "--agent",
+            "hax",
             "--provider",
             "openai-compat",
             "--upstream",
@@ -128,30 +132,55 @@ def test_openai_compat_runs_without_any_key(monkeypatch, tmp_path, capsys):
     assert code == 0, capsys.readouterr().err
 
 
+def spec_for(flags, tmp_path):
+    from sanduk.cli import build_spec, parse_args, relay_root, select
+
+    args = parse_args(flags)
+    sel = select(args)
+    wiring = sel.agent.wire(args, sel.provider, relay_root(args))
+    return build_spec(args, sel, wiring, "sanduk-test", tmp_path, "task")
+
+
 def test_the_container_inherits_only_the_agent_variables(all_keys, tmp_path):
     """The other two keys stay on the host. The container's environment is the
-    inherit list and nothing else."""
-    from sanduk.cli import build_spec, parse_args, resolve_provider
-
-    args = parse_args(["task", "-w", str(tmp_path), "--proxy", "--provider", "openai"])
-    provider = resolve_provider(args)
-    spec = build_spec(args, "sanduk-test", tmp_path, "task", provider=provider)
-    assert spec.inherit_env == ["OPENAI_API_KEY", "OPENAI_BASE_URL"]
-    assert "ANTHROPIC_API_KEY" not in spec.inherit_env
-    assert "OPENROUTER_API_KEY" not in spec.inherit_env
+    inherit list and nothing else. hax reads its own HAX_-prefixed names, which
+    is what --agent-key-env exists to override."""
+    spec = spec_for(
+        [
+            "task",
+            "-w",
+            str(tmp_path),
+            "--proxy",
+            "--agent",
+            "hax",
+            "--provider",
+            "openai",
+        ],
+        tmp_path,
+    )
+    assert spec.inherit_env == ["HAX_OPENAI_API_KEY", "HAX_OPENAI_BASE_URL"]
+    for name in ALL_KEYS:
+        assert name not in spec.inherit_env
 
 
 def test_no_key_value_appears_in_the_container_argv(all_keys, tmp_path):
     """The bare-name -e form exists so values stay out of argv and out of ps."""
-    from sanduk.cli import build_spec, parse_args, resolve_provider
     from sanduk.runtime import get_runtime
 
-    args = parse_args(["task", "-w", str(tmp_path), "--proxy", "--provider", "openai"])
-    provider = resolve_provider(args)
-    argv = get_runtime().run_argv(
-        build_spec(args, "sanduk-test", tmp_path, "task", provider=provider)
+    spec = spec_for(
+        [
+            "task",
+            "-w",
+            str(tmp_path),
+            "--proxy",
+            "--agent",
+            "hax",
+            "--provider",
+            "openai",
+        ],
+        tmp_path,
     )
-    rendered = " ".join(argv)
+    rendered = " ".join(get_runtime().run_argv(spec))
     for value in all_keys.values():
         assert value not in rendered
 
@@ -164,6 +193,8 @@ def test_agent_env_names_can_be_overridden(tmp_path, monkeypatch):
     args = parse_args(
         [
             "task",
+            "--agent",
+            "hax",
             "--provider",
             "openrouter",
             "--agent-key-env",
@@ -179,6 +210,6 @@ def test_agent_env_names_can_be_overridden(tmp_path, monkeypatch):
 def test_agent_env_names_default_to_the_provider(tmp_path):
     from sanduk.cli import container_env_names, parse_args, resolve_provider
 
-    args = parse_args(["task", "--provider", "openrouter"])
+    args = parse_args(["task", "--provider", "anthropic"])
     names = container_env_names(args, resolve_provider(args))
-    assert names == ("OPENROUTER_API_KEY", "OPENROUTER_BASE_URL")
+    assert names == ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL")

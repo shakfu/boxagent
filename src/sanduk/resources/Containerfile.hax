@@ -1,0 +1,28 @@
+# hax: a static musl binary, so the image needs no language runtime at all.
+# Same tool set as the Claude image, minus node.
+FROM docker.io/library/debian:trixie-slim
+
+# Bump with the release you want. The tarball holds the binary under its
+# canonical name, which hax requires: it spawns subagents by invoking `hax`.
+ARG HAX_VERSION=0.5.0
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git ripgrep ca-certificates curl jq python3 \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) arch=x86_64 ;; \
+      arm64) arch=aarch64 ;; \
+      *) echo "no hax release for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    url="https://github.com/OleksandrChekhovskyi/hax/releases/download"; \
+    curl -fsSL "$url/v${HAX_VERSION}/hax-${HAX_VERSION}-linux-${arch}.tar.gz" \
+      | tar -xz -C /usr/local/bin hax; \
+    hax --version
+
+RUN useradd --create-home --uid 1000 agent && mkdir -p /work && chown agent:agent /work
+USER agent
+ENV HOME=/home/agent
+WORKDIR /work
+ENTRYPOINT ["hax"]

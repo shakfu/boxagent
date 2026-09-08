@@ -21,10 +21,20 @@ import shutil
 import sys
 import time
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from sanduk.agent import REPORT_INSTRUCTION, REPORT_NAME, claude_argv, launch
+from sanduk.agent import (
+    DEFAULT_AGENT,
+    REPORT_INSTRUCTION,
+    REPORT_NAME,
+    Agent,
+    Outcome,
+    Wiring,
+    agent_names,
+    get_agent,
+    launch,
+)
 from sanduk.errors import AgentboxError
 from sanduk.preflight import firewall_warning, validate_key
 from sanduk.providers import (
@@ -36,8 +46,6 @@ from sanduk.providers import (
 )
 from sanduk.proxy import ProxyServer, start_proxy
 from sanduk.runtime import (
-    DEFAULT_CONTAINERFILE,
-    DEFAULT_IMAGE,
     DEFAULT_RUNTIME,
     RUNTIMES,
     ContainerSpec,
@@ -85,34 +93,43 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     g.add_argument(
         "-i",
         "--image",
-        default=DEFAULT_IMAGE,
-        help=f"image to run (default: {DEFAULT_IMAGE})",
+        help="image to run (default: the agent's own, e.g. sanduk:latest)",
     )
     g.add_argument(
         "--containerfile",
         type=Path,
-        default=DEFAULT_CONTAINERFILE,
         help="Containerfile used when the image must be built "
-        "(default: the one shipped in the package)",
+        "(default: the agent's, shipped in the package)",
     )
     g.add_argument("--rebuild", action="store_true", help="rebuild the image first")
 
     g = p.add_argument_group("agent")
+    g.add_argument(
+        "--agent",
+        default=DEFAULT_AGENT,
+        metavar="NAME",
+        # Not argparse choices: a handler outside the registry is named as
+        # module:Class, which choices cannot express.
+        help=f"agent handler (default: {DEFAULT_AGENT}; installed: "
+        f"{', '.join(agent_names())}), or module:Class for an unpackaged one. "
+        "claude speaks Anthropic Messages only; hax also speaks OpenAI Chat "
+        "Completions, which is what the other providers need.",
+    )
     g.add_argument("--model", help="model id, e.g. claude-opus-5")
     g.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
     g.add_argument("--max-turns", type=int)
-    g.add_argument("--allowed-tools", help='e.g. "Read Edit Bash(git *)"')
+    g.add_argument("--allowed-tools", help='claude only; e.g. "Read Edit Bash(git *)"')
     g.add_argument(
         "--permission-mode",
         choices=["acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"],
-        help="default: --dangerously-skip-permissions (nobody is "
+        help="claude only; default: --dangerously-skip-permissions (nobody is "
         "there to answer a prompt)",
     )
     g.add_argument(
         "--bare",
         action="store_true",
-        help="claude --bare: no hooks, LSP, plugins, CLAUDE.md "
-        "discovery; auth strictly from ANTHROPIC_API_KEY",
+        help="drop project context: no hooks, LSP, plugins, or CLAUDE.md / "
+        "AGENTS.md discovery",
     )
     g.add_argument(
         "--no-report-instruction",
@@ -133,7 +150,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="extra environment variable (repeatable)",
     )
     g.add_argument(
-        "--base-url", help="set ANTHROPIC_BASE_URL inside the container directly"
+        "--base-url",
+        help="point the agent at this endpoint directly, without a relay",
     )
     g.add_argument("--network", help="attach to this container network")
 
@@ -242,45 +260,81 @@ def resolve_provider(args: argparse.Namespace) -> Provider:
     return provider
 
 
+@dataclass(frozen=True)
+class Selection:
+    """What the flags select. None of it depends on the relay being up yet."""
+
+    agent: Agent
+    provider: Provider
+    image: str
+    containerfile: Path
+
+
+def select(args: argparse.Namespace) -> Selection:
+    """Resolve the agent and provider together, and refuse an unusable pair."""
+    agent = get_agent(args.agent)
+    provider = resolve_provider(args)
+    agent.check(args, provider)
+    containerfile = args.containerfile or agent.containerfile
+    if not agent.image or not containerfile:
+        raise AgentboxError(
+            f"agent {agent.name!r} names no image or Containerfile; pass "
+            "--image and --containerfile, or fix the handler"
+        )
+    return Selection(
+        agent=agent,
+        provider=provider,
+        image=args.image or agent.image,
+        containerfile=containerfile,
+    )
+
+
+def relay_root(args: argparse.Namespace, gateway: str = "", port: int = 0) -> str | None:
+    """The endpoint root the container is pointed at, or None for the agent's own."""
+    if args.proxy:
+        return f"http://{gateway}:{port}"
+    base_url: str | None = args.base_url
+    return base_url
+
+
 def container_env_names(args: argparse.Namespace, provider: Provider) -> tuple[str, str]:
     """(key var, base-url var) the agent reads inside the container.
 
     Separate from the provider's own env names, which is where sanduk reads the
     real key on the host. They coincide for Claude Code against Anthropic and
-    diverge for anything else, so an agent is pointed at the relay with flags
-    rather than with a new module.
+    diverge for everything else, so the agent declares them and --agent-key-env
+    overrides them.
     """
-    return (
-        args.agent_key_env or provider.key_env,
-        args.agent_base_url_env or provider.base_url_env,
-    )
+    wiring = get_agent(args.agent).wire(args, provider, relay_root(args))
+    return wiring.key_env, wiring.base_url_env
 
 
 def build_spec(
     args: argparse.Namespace,
+    sel: Selection,
+    wiring: Wiring,
     name: str,
     workdir: Path,
     task: str,
     network: str | None = None,
-    provider: Provider | None = None,
 ) -> ContainerSpec:
     """Map parsed flags onto one engine-neutral container description."""
-    key_env, base_url_env = container_env_names(args, provider or get_provider())
-    inherit = [key_env]
+    inherit = [wiring.key_env]
     # In proxy mode the inherited value is the run token, not the real key, and
-    # ANTHROPIC_BASE_URL points back at the host. Both come from the child env
-    # (see child_env in run), so neither appears in this argv or in `ps`.
-    if args.proxy or args.base_url:
-        inherit.append(base_url_env)
+    # the base URL points back at the host. Both come from the child env (see
+    # child_env in run), so neither appears in this argv or in `ps`.
+    if wiring.base_url:
+        inherit.append(wiring.base_url_env)
     return ContainerSpec(
         name=name,
-        image=args.image,
-        command=claude_argv(args, task),
+        image=sel.image,
+        command=sel.agent.argv(args, sel.provider, task),
         cpus=args.cpus,
         memory=args.memory,
         mount=(workdir, "/work"),
         inherit_env=inherit,
-        env=list(args.env),
+        # The agent's own settings first, so an explicit -e can override one.
+        env=[f"{k}={v}" for k, v in wiring.env.items()] + list(args.env),
         network=network,
     )
 
@@ -296,27 +350,10 @@ def read_task(args: argparse.Namespace) -> str:
     return task
 
 
-def report_usage(result: dict[str, object]) -> None:
-    usage = result.get("usage", {})
-    assert isinstance(usage, dict)
-    cached = usage.get("cache_read_input_tokens", 0)
-    total_in = (
-        usage.get("input_tokens", 0)
-        + usage.get("cache_creation_input_tokens", 0)
-        + cached
-    )
-    note(
-        f"{result.get('num_turns', '?')} turns, "
-        f"{total_in:,} in ({cached:,} cached) / "
-        f"{usage.get('output_tokens', 0):,} out, "
-        f"${result.get('total_cost_usd', 0):.4f}"
-    )
-
-
 def run(args: argparse.Namespace) -> int:
     runtime = get_runtime(args.runtime)
-    provider = resolve_provider(args)
-    agent_key_env, agent_base_url_env = container_env_names(args, provider)
+    sel = select(args)
+    provider = sel.provider
     api_url = f"{provider.scheme}://{provider.host}"
     task = read_task(args)
 
@@ -339,6 +376,7 @@ def run(args: argparse.Namespace) -> int:
     proxy_srv: ProxyServer | None = None
     holder: str | None = None
     gateway, port = "", 0
+    token = ""
     child_env = os.environ.copy()
 
     if args.proxy:
@@ -348,38 +386,42 @@ def run(args: argparse.Namespace) -> int:
         gateway, _ = runtime.ensure_network(network)
         token = secrets.token_urlsafe(24)
         if not args.dry_run:
-            if args.rebuild or not runtime.image_exists(args.image):
-                runtime.build_image(args.image, args.containerfile)
-            holder = runtime.hold_network_up(network, args.image)
+            if args.rebuild or not runtime.image_exists(sel.image):
+                runtime.build_image(sel.image, sel.containerfile)
+            holder = runtime.hold_network_up(network, sel.image)
             if not wait_for_gateway(gateway):
                 if holder:
                     runtime.destroy(holder)
                 raise AgentboxError(f"{gateway} never became bindable on this host")
             proxy_srv, port = _start_relay(args, key, token, gateway, name, provider)
-        # The container inherits the token under the agent's key variable. The
-        # real key stays in this process and in the proxy thread only.
-        child_env[agent_key_env] = token
-        child_env[agent_base_url_env] = f"http://{gateway}:{port}"
-    elif args.base_url:
-        child_env[agent_base_url_env] = args.base_url
+
+    wiring = sel.agent.wire(args, provider, relay_root(args, gateway, port))
+    # In proxy mode the container gets the run token; the real key stays in this
+    # process and in the proxy thread. Either way the value comes from the child
+    # env, so it appears in no argv and in no `ps` line.
+    secret = token if args.proxy else key
+    if secret:
+        child_env[wiring.key_env] = secret
+    if wiring.base_url:
+        child_env[wiring.base_url_env] = wiring.base_url
 
     cmd = runtime.run_argv(
-        build_spec(args, name, workdir, task, network=network, provider=provider)
+        build_spec(args, sel, wiring, name, workdir, task, network=network)
     )
 
     if args.dry_run:
         print(shlex.join(cmd))
         if args.proxy:
             print(f"# proxy: {gateway} -> {api_url} ({provider.name})")
-            print(
-                f"# container env: {agent_key_env}=<run token> "
-                f"{agent_base_url_env}={child_env[agent_base_url_env]}"
-            )
+        print(
+            f"# container env: {wiring.key_env}=<credential> "
+            f"{wiring.base_url_env}={wiring.base_url or '<agent default>'}"
+        )
         return 0
 
     runtime.require()
-    if args.rebuild or not runtime.image_exists(args.image):
-        runtime.build_image(args.image, args.containerfile)
+    if args.rebuild or not runtime.image_exists(sel.image):
+        runtime.build_image(sel.image, sel.containerfile)
 
     if args.proxy:
         note(
@@ -389,7 +431,7 @@ def run(args: argparse.Namespace) -> int:
     note(f"{name} -> {workdir}")
     started = time.monotonic()
     try:
-        result, rc = launch(cmd, args.timeout, args.quiet, env=child_env)
+        outcome, rc = launch(sel.agent, cmd, args.timeout, args.quiet, env=child_env)
     except KeyboardInterrupt:
         runtime.destroy(name)
         raise AgentboxError("interrupted", code=130) from None
@@ -407,13 +449,13 @@ def run(args: argparse.Namespace) -> int:
     runtime.destroy(name, args.keep)
 
     note(f"{time.monotonic() - started:.1f}s wall")
-    if result:
-        report_usage(result)
-        if result.get("is_error"):
-            note(f"agent reported an error: {result.get('result')}")
+    if outcome:
+        note(outcome.stats)
+        if not outcome.ok:
+            note(f"agent reported an error: {outcome.error}")
             return 1
 
-    return _collect_report(args, workdir, result, rc)
+    return _collect_report(args, workdir, outcome, rc)
 
 
 def _start_relay(
@@ -447,7 +489,7 @@ def _start_relay(
 def _collect_report(
     args: argparse.Namespace,
     workdir: Path,
-    result: dict[str, object] | None,
+    outcome: Outcome | None,
     rc: int,
 ) -> int:
     report = workdir / REPORT_NAME
@@ -459,8 +501,8 @@ def _collect_report(
             note(f"report -> {report}")
     else:
         note(f"the agent wrote no {REPORT_NAME}")
-        if result and result.get("result"):
-            print(f"\n{result['result']}")
+        if outcome and outcome.text:
+            print(f"\n{outcome.text}")
     return 0 if rc == 0 else rc
 
 

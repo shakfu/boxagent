@@ -23,14 +23,6 @@ from pathlib import Path
 from sanduk.errors import AgentboxError
 from sanduk.util import note, run
 
-DEFAULT_IMAGE = "sanduk:latest"
-
-# Shipped inside the package so a `pip install sanduk` can build the image
-# without a checkout. __file__ rather than importlib.resources: the engine
-# needs a real path on disk for `build -f`, which a Traversable does not
-# promise.
-DEFAULT_CONTAINERFILE = Path(__file__).parent / "resources" / "Containerfile"
-
 
 @dataclass
 class ContainerSpec:

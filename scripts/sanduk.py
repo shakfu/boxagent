@@ -47,7 +47,7 @@ REPORT_NAME = "REPORT.md"
 
 # The image definition, embedded so this script builds its own image with
 # nothing beside it on disk. Kept byte-identical to
-# src/sanduk/resources/Containerfile; tests/test_script.py enforces that.
+# src/sanduk/resources/Containerfile.claude; tests/test_script.py enforces that.
 CONTAINERFILE = r"""FROM docker.io/library/node:22-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
