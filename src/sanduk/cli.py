@@ -18,9 +18,11 @@ import os
 import secrets
 import shlex
 import shutil
+import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -34,6 +36,7 @@ from sanduk.agent import (
     agent_names,
     get_agent,
     launch,
+    registry,
 )
 from sanduk.errors import AgentboxError
 from sanduk.preflight import firewall_warning, validate_key
@@ -46,6 +49,7 @@ from sanduk.providers import (
 )
 from sanduk.proxy import ProxyServer, start_proxy
 from sanduk.runtime import (
+    CONTAINER_PREFIX,
     DEFAULT_RUNTIME,
     RUNTIMES,
     ContainerSpec,
@@ -54,21 +58,74 @@ from sanduk.runtime import (
 )
 from sanduk.util import note
 
+COMMANDS = (
+    "run",
+    "build",
+    "shell",
+    "ps",
+    "stop",
+    "clean",
+    "destroy",
+    "system",
+    "list",
+)
+
+RUN_EPILOG = (
+    "The API key comes from the provider's environment variable only.\n"
+    "\n"
+    "  export ANTHROPIC_API_KEY=sk-ant-...\n"
+    "  sanduk run 'Summarise every .py file here.' -w ./work\n"
+    "  sanduk run --task-file brief.md -w ./repo --keep\n"
+    "  sanduk run 'Review this.' --agent hax --provider openai-compat \\\n"
+    "      --upstream http://127.0.0.1:8080 --proxy\n"
+)
+
+
+def engine_flags() -> argparse.ArgumentParser:
+    """Flags every command that talks to a container engine takes.
+
+    Carried by a parent parser rather than the main one: a flag defined in both
+    places has the subparser's default overwrite whatever came before the verb,
+    so `sanduk --runtime docker run` would silently use the default.
+    """
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument(
+        "--runtime",
+        choices=sorted(RUNTIMES),
+        default=DEFAULT_RUNTIME,
+        help=f"container engine (default: {DEFAULT_RUNTIME})",
+    )
+    p.add_argument(
+        "-q", "--quiet", action="store_true", help="suppress the per-event trace"
+    )
+    return p
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        prog="sanduk",
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and not argv[0].startswith("-") and argv[0] not in COMMANDS:
+        # argparse would say "invalid choice", which is true and unhelpful. The
+        # first argument used to be the task, so this is the mistake to expect.
+        raise AgentboxError(
+            f"{argv[0]!r} is not a command. Did you mean: "
+            f"sanduk run {shlex.quote(argv[0])}\n"
+            f"commands: {', '.join(COMMANDS)}"
+        )
+
+    root = argparse.ArgumentParser(
+        prog="sanduk", description="Run an agent in a disposable container."
+    )
+    sub = root.add_subparsers(dest="command", metavar="<command>", required=True)
+    _add_engine_commands(sub)
+    _add_list(sub)
+
+    p = sub.add_parser(
+        "run",
+        parents=[engine_flags()],
+        help="run an agent in a disposable container",
         description="Run an agent in a disposable container.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "The API key comes from the provider's environment variable only.\n"
-            "\n"
-            "  export ANTHROPIC_API_KEY=sk-ant-...\n"
-            "  sanduk 'Summarise every .py file in this directory.' -w ./work\n"
-            "  sanduk --task-file brief.md -w ./repo --keep\n"
-            "  sanduk 'Review this.' --provider openai-compat \\\n"
-            "      --upstream http://127.0.0.1:8080 --proxy\n"
-        ),
+        epilog=RUN_EPILOG,
     )
     p.add_argument("task", nargs="?", help="the task prompt (or use --task-file)")
     p.add_argument("--task-file", type=Path, help="read the task prompt from a file")
@@ -82,13 +139,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "-o", "--report", type=Path, help="copy the agent's REPORT.md here after the run"
     )
-    p.add_argument(
-        "--runtime",
-        choices=sorted(RUNTIMES),
-        default=DEFAULT_RUNTIME,
-        help=f"container engine (default: {DEFAULT_RUNTIME})",
-    )
-
     g = p.add_argument_group("image")
     g.add_argument(
         "-i",
@@ -242,13 +292,169 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="do not delete the container when the run ends",
     )
     g.add_argument(
-        "-q", "--quiet", action="store_true", help="suppress the per-event trace"
-    )
-    g.add_argument(
         "--dry-run", action="store_true", help="print the container command and exit"
     )
     g.add_argument("--skip-key-check", action="store_true")
-    return p.parse_args(argv)
+    return root.parse_args(argv)
+
+
+def _add_engine_commands(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    """The verbs that only talk to a container engine."""
+    engine = engine_flags()
+
+    p = sub.add_parser("build", parents=[engine], help="build the agent's image")
+    p.add_argument("--agent", default=DEFAULT_AGENT, metavar="NAME")
+    p.add_argument("-i", "--image", help="tag to build (default: the agent's)")
+    p.add_argument("--containerfile", type=Path, help="default: the agent's")
+    p.add_argument(
+        "--force", action="store_true", help="rebuild even if the image exists"
+    )
+
+    p = sub.add_parser(
+        "shell", parents=[engine], help="interactive shell in the agent's image"
+    )
+    p.add_argument("--agent", default=DEFAULT_AGENT, metavar="NAME")
+    p.add_argument("-i", "--image", help="image to enter (default: the agent's)")
+    # resolve_image reads it; only run and build can build one.
+    p.set_defaults(containerfile=None)
+
+    for verb, helptext in (
+        ("ps", f"list {CONTAINER_PREFIX}* containers"),
+        ("stop", "stop running sanduk containers, leaving them on disk"),
+        ("clean", "stop and delete sanduk containers"),
+    ):
+        sub.add_parser(verb, parents=[engine], help=helptext)
+
+    p = sub.add_parser(
+        "destroy", parents=[engine], help="clean, plus the image and the network"
+    )
+    p.add_argument("--agent", default=DEFAULT_AGENT, metavar="NAME")
+    p.add_argument("-i", "--image", help="image to delete (default: the agent's)")
+    p.add_argument(
+        "--proxy-network",
+        default="sanduk-net",
+        help="network to delete (default: sanduk-net)",
+    )
+    p.set_defaults(containerfile=None)
+
+    p = sub.add_parser(
+        "system", parents=[engine], help="show or change the engine's own service"
+    )
+    p.add_argument("action", choices=["status", "start", "stop"])
+
+
+def _add_list(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """`list` reads registries, not an engine, so it takes no engine flags."""
+    p = sub.add_parser("list", help="show registered agents, providers, runtimes")
+    p.add_argument("axis", choices=["agents", "providers", "runtimes"])
+
+
+def build(args: argparse.Namespace) -> int:
+    runtime = get_runtime(args.runtime)
+    _, image, containerfile = resolve_image(args)
+    runtime.require()
+    if runtime.image_exists(image) and not args.force:
+        note(f"{image} is already built (--force to rebuild)")
+        return 0
+    runtime.build_image(image, containerfile)
+    return 0
+
+
+def shell(args: argparse.Namespace) -> int:
+    runtime = get_runtime(args.runtime)
+    _, image, _ = resolve_image(args)
+    runtime.require()
+    if not runtime.image_exists(image):
+        raise AgentboxError(
+            f"{image} is not built. Run: sanduk build --agent {args.agent}"
+        )
+    # Handed straight to the terminal: this one inherits the tty rather than
+    # having its stdout read.
+    return subprocess.call(runtime.shell_argv(image))
+
+
+def ps(args: argparse.Namespace) -> int:
+    runtime = get_runtime(args.runtime)
+    runtime.require()
+    found = runtime.list_containers(CONTAINER_PREFIX)
+    for c in found:
+        print(f"{c.name:22}  {c.image:24}  {c.state}")
+    if not found:
+        note("no sanduk containers")
+    return 0
+
+
+def stop(args: argparse.Namespace) -> int:
+    runtime = get_runtime(args.runtime)
+    runtime.require()
+    running = [
+        c for c in runtime.list_containers(CONTAINER_PREFIX) if c.state == "running"
+    ]
+    for c in running:
+        runtime.stop(c.name)
+        note(f"stopped {c.name}")
+    if not running:
+        note("no running sanduk containers")
+    return 0
+
+
+def clean(args: argparse.Namespace) -> int:
+    """Delete every container sanduk named. Nothing else carries the prefix."""
+    runtime = get_runtime(args.runtime)
+    runtime.require()
+    found = runtime.list_containers(CONTAINER_PREFIX)
+    for c in found:
+        runtime.destroy(c.name)
+    if not found:
+        note("no sanduk containers to delete")
+    return 0
+
+
+def destroy(args: argparse.Namespace) -> int:
+    """Everything sanduk made on this engine, except the request-body log.
+
+    That log is written outside the bind mount so the agent cannot edit its own
+    audit trail; deleting it as a side effect of a cleanup verb would undo the
+    point of putting it there.
+    """
+    runtime = get_runtime(args.runtime)
+    _, image, _ = resolve_image(args)
+    clean(args)
+    runtime.delete_image(image)
+    runtime.delete_network(args.proxy_network)
+    return 0
+
+
+def system(args: argparse.Namespace) -> int:
+    # No require() first: whether the engine is usable is what status reports.
+    runtime = get_runtime(args.runtime)
+    if args.action == "status":
+        print(runtime.service_status())
+    elif args.action == "start":
+        runtime.service_start()
+    else:
+        runtime.service_stop()
+    return 0
+
+
+def show(args: argparse.Namespace) -> int:
+    """One row per registered thing, on stdout."""
+    if args.axis == "agents":
+        for name, agent in sorted(registry().items()):
+            protocols = ", ".join(sorted(agent.protocols))
+            print(f"{name:8}  {agent.image:20}  {protocols}")
+    elif args.axis == "providers":
+        for name, provider in sorted(PROVIDERS.items()):
+            url = f"{provider.scheme}://{provider.host}{provider.api_prefix}"
+            key = provider.key_env if provider.has_auth else "(no key needed)"
+            print(f"{name:14}  {url:34}  {key}")
+    else:
+        for name, engine in sorted(RUNTIMES.items()):
+            found = "installed" if shutil.which(engine.cli) else "not installed"
+            print(f"{name:8}  {engine.cli:12}  {found}")
+    return 0
 
 
 def resolve_provider(args: argparse.Namespace) -> Provider:
@@ -270,22 +476,28 @@ class Selection:
     containerfile: Path
 
 
-def select(args: argparse.Namespace) -> Selection:
-    """Resolve the agent and provider together, and refuse an unusable pair."""
+def resolve_image(args: argparse.Namespace) -> tuple[Agent, str, Path]:
+    """(agent, image, Containerfile), before any provider is known.
+
+    `build` and `shell` need this and nothing else; `select` adds the provider.
+    """
     agent = get_agent(args.agent)
-    provider = resolve_provider(args)
-    agent.check(args, provider)
     containerfile = args.containerfile or agent.containerfile
     if not agent.image or not containerfile:
         raise AgentboxError(
             f"agent {agent.name!r} names no image or Containerfile; pass "
             "--image and --containerfile, or fix the handler"
         )
+    return agent, args.image or agent.image, containerfile
+
+
+def select(args: argparse.Namespace) -> Selection:
+    """Resolve the agent and provider together, and refuse an unusable pair."""
+    agent, image, containerfile = resolve_image(args)
+    provider = resolve_provider(args)
+    agent.check(args, provider)
     return Selection(
-        agent=agent,
-        provider=provider,
-        image=args.image or agent.image,
-        containerfile=containerfile,
+        agent=agent, provider=provider, image=image, containerfile=containerfile
     )
 
 
@@ -371,7 +583,7 @@ def run(args: argparse.Namespace) -> int:
         # Before anything is started, so a bad key cannot leak a container.
         validate_key(key, api_url if args.proxy else (args.base_url or api_url), provider)
 
-    name = f"sanduk-{uuid.uuid4().hex[:8]}"
+    name = f"{CONTAINER_PREFIX}{uuid.uuid4().hex[:8]}"
     network: str | None = args.network
     proxy_srv: ProxyServer | None = None
     holder: str | None = None
@@ -392,7 +604,9 @@ def run(args: argparse.Namespace) -> int:
             if not wait_for_gateway(gateway):
                 if holder:
                     runtime.destroy(holder)
-                raise AgentboxError(f"{gateway} never became bindable on this host")
+                raise AgentboxError(
+                    f"{gateway} never became bindable on this host.{runtime.gateway_hint}"
+                )
             proxy_srv, port = _start_relay(args, key, token, gateway, name, provider)
 
     wiring = sel.agent.wire(args, provider, relay_root(args, gateway, port))
@@ -506,9 +720,23 @@ def _collect_report(
     return 0 if rc == 0 else rc
 
 
+COMMAND_FUNCS: dict[str, Callable[[argparse.Namespace], int]] = {
+    "run": run,
+    "build": build,
+    "shell": shell,
+    "ps": ps,
+    "stop": stop,
+    "clean": clean,
+    "destroy": destroy,
+    "system": system,
+    "list": show,
+}
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
-        return run(parse_args(argv))
+        args = parse_args(argv)
+        return COMMAND_FUNCS[args.command](args)
     except AgentboxError as e:
         print(f"sanduk: {e}", file=sys.stderr)
         return e.code

@@ -14,10 +14,9 @@ TASK    ?= Summarise every Python file here.
 ARGS    ?=
 UV      ?= uv
 RUN     ?= $(UV) run
-ENGINE  ?= container
-CONTAINERFILE = src/$(PKG)/resources/Containerfile.$(AGENT)
 
-export IMAGE NETWORK
+# The integration suite reads these to pick what it boots.
+export AGENT IMAGE NETWORK
 
 .DEFAULT_GOAL := help
 .PHONY: help sync build wheel sdist dist check publish-test publish upgrade \
@@ -117,47 +116,37 @@ docs:  ## Build documentation (sphinx is fetched on demand)
 # --- image ------------------------------------------------------------------
 
 image:  ## Build the agent image if it is missing
-	@$(ENGINE) image list 2>/dev/null | awk 'NR>1 {print $$1":"$$2}' \
-	  | grep -qx '$(IMAGE)' \
-	  && echo "$(IMAGE) already built (make image-rebuild to force)" \
-	  || $(ENGINE) build -t $(IMAGE) -f $(CONTAINERFILE) $(dir $(CONTAINERFILE))
+	@$(RUN) sanduk build --agent $(AGENT)
 
 image-rebuild:  ## Rebuild the agent image unconditionally
-	$(ENGINE) build -t $(IMAGE) -f $(CONTAINERFILE) $(dir $(CONTAINERFILE))
+	@$(RUN) sanduk build --agent $(AGENT) --force
 
 # --- running ----------------------------------------------------------------
 
 run:  ## Run the agent. TASK='...' WORK=./dir AGENT=hax ARGS='--effort max'
-	@$(RUN) sanduk "$(TASK)" -w $(WORK) --agent $(AGENT) $(ARGS)
+	@$(RUN) sanduk run "$(TASK)" -w $(WORK) --agent $(AGENT) $(ARGS)
 
 run-proxy:  ## Run with no egress and the key held on the host
-	@$(RUN) sanduk "$(TASK)" -w $(WORK) --agent $(AGENT) --proxy $(ARGS)
+	@$(RUN) sanduk run "$(TASK)" -w $(WORK) --agent $(AGENT) --proxy $(ARGS)
 
 shell:  ## Interactive shell in the agent image (no network, nothing mounted)
-	$(ENGINE) run --rm -it --entrypoint sh $(IMAGE)
+	@$(RUN) sanduk shell --agent $(AGENT)
 
 # --- inspection -------------------------------------------------------------
 
-ps:  ## List every container, sanduk or not
-	@$(ENGINE) list -a
+ps:  ## List sanduk containers
+	@$(RUN) sanduk ps
 
 logs:  ## Show recorded request bodies from --log-bodies runs
 	@ls -R sanduk-logs 2>/dev/null || echo "no logs (run with --log-bodies)"
 
 # --- teardown ---------------------------------------------------------------
 
-# stop and clean match ^sanduk- only, so containers you named otherwise are
-# never touched.
-
 stop:  ## Stop running sanduk containers, leaving them on disk
-	@ids=$$($(ENGINE) list 2>/dev/null | awk 'NR>1 && $$1 ~ /^sanduk-/ {print $$1}'); \
-	if [ -n "$$ids" ]; then $(ENGINE) stop $$ids >/dev/null && echo stopped: $$ids; \
-	else echo "no running sanduk containers"; fi
+	@$(RUN) sanduk stop
 
-clean: stop  ## Delete sanduk containers and build scratch. Keeps work/ and logs
-	@ids=$$($(ENGINE) list -a 2>/dev/null | awk 'NR>1 && $$1 ~ /^sanduk-/ {print $$1}'); \
-	if [ -n "$$ids" ]; then $(ENGINE) delete --force $$ids >/dev/null && echo deleted: $$ids; \
-	else echo "no sanduk containers to delete"; fi
+clean:  ## Delete sanduk containers and build scratch. Keeps work/ and logs
+	@$(RUN) sanduk clean
 	@rm -rf build/ dist/ htmlcov/ .coverage .pytest_cache/
 	@rm -rf src/*.egg-info/ *.egg-info/
 	@find . -name "__pycache__" -type d -prune -exec rm -rf {} +
@@ -166,11 +155,9 @@ clean: stop  ## Delete sanduk containers and build scratch. Keeps work/ and logs
 distclean: clean  ## clean, plus the resolved environment and tool caches
 	@rm -rf .venv/ .mypy_cache/ .ruff_cache/
 
-destroy: clean  ## clean, plus the image, the network, and recorded request bodies
-	@$(ENGINE) image delete $(IMAGE) >/dev/null 2>&1 \
-	  && echo "deleted image $(IMAGE)" || echo "no image $(IMAGE)"
-	@$(ENGINE) network delete $(NETWORK) >/dev/null 2>&1 \
-	  && echo "deleted network $(NETWORK)" || echo "no network $(NETWORK)"
+destroy:  ## clean, plus the image, the network, and recorded request bodies
+	@$(RUN) sanduk destroy --agent $(AGENT) --proxy-network $(NETWORK)
+	@rm -rf build/ dist/ htmlcov/ .coverage .pytest_cache/
 	@if [ -d sanduk-logs ]; then \
 	  n=$$(find sanduk-logs -name '*.json' | wc -l | tr -d ' '); \
 	  rm -rf sanduk-logs; echo "deleted sanduk-logs ($$n files)"; \
@@ -178,11 +165,11 @@ destroy: clean  ## clean, plus the image, the network, and recorded request bodi
 
 # --- container service ------------------------------------------------------
 
-system-status:  ## Show whether the container service is running
-	@$(ENGINE) system status
+system-status:  ## Show whether the container engine is ready
+	@$(RUN) sanduk system status
 
-system-start:  ## Start the container service (registers it with launchd)
-	$(ENGINE) system start
+system-start:  ## Start the engine's service, where it has one
+	@$(RUN) sanduk system start
 
-system-stop:  ## Stop the container service. NOTE: system-wide, not just sanduk
-	$(ENGINE) system stop
+system-stop:  ## Stop it. NOTE: system-wide, not just sanduk
+	@$(RUN) sanduk system stop

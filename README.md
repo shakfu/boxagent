@@ -36,7 +36,7 @@ make run TASK='Summarise every Python file here.' WORK=./work
 Or directly, which is where all the flags live:
 
 ```text
-uv run sanduk 'Summarise every Python file here.' -w ./work --proxy
+uv run sanduk run 'Summarise every Python file here.' -w ./work --proxy
 uv run sanduk --help
 ```
 
@@ -56,6 +56,24 @@ The default mode is filesystem isolation and nothing more. `--proxy` is where th
 
 With a local model the relay is no longer protecting a credential, because there is not one. What it still does is hold the agent to an exact path allowlist, enforce the model and token policy where the container cannot edit it, and record what was sent.
 
+## Commands
+
+```text
+sanduk run <task>          run an agent in a disposable container
+sanduk build               build the agent's image
+sanduk shell               interactive shell in that image
+sanduk ps                  list sanduk containers
+sanduk stop                stop them, leaving them on disk
+sanduk clean               stop and delete them
+sanduk destroy             clean, plus the image and the network
+sanduk system status       whether the engine is ready
+sanduk list agents         what each registered handler speaks
+sanduk list providers      the URL an agent must be given, per provider
+sanduk list runtimes       engines, and whether each is installed
+```
+
+Every container-engine call sanduk makes goes through `Runtime`, so the Makefile names no engine and `--runtime` selects one for any of these.
+
 ## Providers
 
 ```text
@@ -73,7 +91,7 @@ A local model:
 
 ```text
 llama-server -m ~/.models/some-model.gguf --port 8080 --alias local-model
-sanduk 'Review this.' -w ./repo --proxy \
+sanduk run 'Review this.' -w ./repo --proxy \
     --provider openai-compat --upstream http://127.0.0.1:8080 --model local-model
 ```
 
@@ -93,7 +111,7 @@ The relay only forwards. It does not translate between protocols, so the agent h
 A handler says which image carries the agent, what flags drive it headlessly, which variables it reads its endpoint from, and how to read its JSON stream. Nothing else about a run differs, so a third agent is a class in your own package, advertised in the `sanduk.agents` entry-point group or named directly as `--agent mypkg.handlers:MyAgent`. See [docs/agents.md](docs/agents.md).
 
 ```text
-sanduk 'Review this.' -w ./repo --proxy --agent hax \
+sanduk run 'Review this.' -w ./repo --proxy --agent hax \
     --provider openrouter --model anthropic/claude-sonnet-5
 ```
 
@@ -126,7 +144,7 @@ hax is a static C binary with no approval gate, which suits a container that is 
 ```text
 src/sanduk/
     cli.py         flags, lifecycle, teardown
-    runtime.py     container engines; ContainerSpec; only `apple` is implemented
+    runtime.py     container engines; ContainerSpec; `apple` and `docker`
     providers.py   provider records, wire protocols, route tables
     agent.py       the agent strategy: interface, registry, plugin loading
     agents/        the shipped handlers: claude.py, hax.py
@@ -137,7 +155,9 @@ src/sanduk/
         Containerfile.hax
 ```
 
-A second agent is an `Agent` subclass in any package; see [docs/agents.md](docs/agents.md). A second engine is a `Runtime` subclass and a `RUNTIMES` entry. It must supply four things: the CLI name, the verb that deletes a container (`rm`, not `delete`), how `network inspect` reports the gateway, and whether the host bridge needs a placeholder container to exist at all.
+A second agent is an `Agent` subclass in any package; see [docs/agents.md](docs/agents.md). A third engine is a `Runtime` subclass and a `RUNTIMES` entry. It must supply four things: the CLI name, the verb that deletes a container (`rm`, not `delete`), how `network inspect` reports the gateway, and whether the host bridge needs a placeholder container to exist at all.
+
+`--runtime docker` needs a daemon on this kernel, not one in a VM. Docker Desktop, Colima and Lima keep the bridge inside the VM, so the relay cannot bind the gateway; the run stops at the bind with that reason rather than listening somewhere the container cannot reach. `--runtime apple` is the macOS path.
 
 ## Make targets
 
@@ -163,6 +183,10 @@ make system-start / system-stop / system-status
 ```
 
 `make system-stop` stops Apple's container service for everything on the machine, not just sanduk.
+
+## CI
+
+`.github/workflows/ci.yml` runs lint, format and types once, the fast suite across `ubuntu-latest` and `macos-latest` on the declared Python bounds, and the integration suite on Linux against a real Docker daemon. That last job is not redundancy: a native daemon puts the bridge on the host kernel, so it is the only place `--proxy` can be proved. Neither Apple's engine nor Docker Desktop can, and both are what you have locally.
 
 ## Testing
 

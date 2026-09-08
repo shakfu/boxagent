@@ -4,6 +4,7 @@ No containers and no network: everything here is a pure function or is
 monkeypatched.
 """
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -18,7 +19,7 @@ KEY = "sk-ant-api03-SECRET"
 
 
 def argv_for(*flags, workdir, network=None):
-    args = parse_args(list(flags))
+    args = parse_args(["run", *flags])
     sel = select(args)
     wiring = sel.agent.wire(args, sel.provider, relay_root(args))
     return get_runtime().run_argv(
@@ -34,8 +35,8 @@ def test_default_runtime_is_apple_container():
 
 
 def test_unknown_runtime_names_the_known_ones():
-    with pytest.raises(AgentboxError, match="apple"):
-        get_runtime("docker")
+    with pytest.raises(AgentboxError, match="apple, docker"):
+        get_runtime("nerdctl")
 
 
 # --- argv construction ------------------------------------------------------
@@ -115,3 +116,183 @@ def test_image_exists_reads_the_listing(monkeypatch):
     assert engine.image_exists("sanduk") is True  # tag defaults to latest
     assert not engine.image_exists("sanduk:test")
     assert not engine.image_exists("missing:latest")
+
+
+# --- docker -----------------------------------------------------------------
+#
+# No daemon is contacted: every subprocess call is replaced. What these pin is
+# the shape of each command and how its output is read, which is the whole of
+# what a Runtime subclass is.
+
+
+def responses(monkeypatch, *, returncode=0, stdout=""):
+    """Record the argv of every engine call, answering each the same way."""
+    calls = []
+
+    def fake(cmd, **kw):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(runtime, "run", fake)
+    return calls
+
+
+def test_docker_is_in_the_registry():
+    assert get_runtime("docker").cli == "docker"
+
+
+def test_docker_deletes_with_rm():
+    """`container delete` is `docker rm`; the base class runs stop first."""
+    assert get_runtime("docker").delete_verb == "rm"
+
+
+def test_docker_needs_no_network_holder():
+    """Docker creates the bridge with the network; vmnet only while attached."""
+    assert not get_runtime("docker").needs_network_holder
+    assert get_runtime("docker").hold_network_up("sanduk-net", "img") is None
+
+
+def test_docker_image_exists_is_an_exit_status(monkeypatch):
+    calls = responses(monkeypatch, returncode=0)
+    assert get_runtime("docker").image_exists("sanduk-hax:latest")
+    assert calls == [["docker", "image", "inspect", "sanduk-hax:latest"]]
+
+
+def test_docker_image_exists_is_false_when_inspect_fails(monkeypatch):
+    responses(monkeypatch, returncode=1)
+    assert not get_runtime("docker").image_exists("nope:latest")
+
+
+DOCKER_NETWORK = """
+[{"Name": "sanduk-net", "Internal": true,
+  "IPAM": {"Config": [{"Subnet": "172.20.0.0/16", "Gateway": "172.20.0.1"}]}}]
+"""
+
+
+def test_docker_reads_the_gateway_from_the_ipam_block(monkeypatch):
+    """Apple reports it under status.ipv4Gateway; Docker under IPAM.Config."""
+    responses(monkeypatch, stdout=DOCKER_NETWORK)
+    assert get_runtime("docker").network_info("sanduk-net") == (
+        "172.20.0.1",
+        "172.20.0.0/16",
+    )
+
+
+@pytest.mark.parametrize("stdout", ["", "not json", "[]", '[{"IPAM": {}}]'])
+def test_docker_network_info_is_none_when_the_gateway_is_absent(monkeypatch, stdout):
+    """A network with no address must read as absent, not as a partial answer:
+    ensure_network turns None into an error naming the network."""
+    responses(monkeypatch, stdout=stdout)
+    assert get_runtime("docker").network_info("sanduk-net") is None
+
+
+def test_docker_network_info_is_none_when_the_network_is_missing(monkeypatch):
+    responses(monkeypatch, returncode=1, stdout=DOCKER_NETWORK)
+    assert get_runtime("docker").network_info("sanduk-net") is None
+
+
+def test_an_unreachable_docker_daemon_is_named(monkeypatch):
+    responses(monkeypatch, returncode=1)
+    monkeypatch.setattr(runtime.shutil, "which", lambda _: "/usr/bin/docker")
+    with pytest.raises(AgentboxError, match="daemon"):
+        get_runtime("docker").require()
+
+
+def test_the_two_engines_render_one_spec_identically():
+    """run_argv is shared. Apple's engine adopted Docker's flag surface, so the
+    day that stops being true, this fails rather than a container run."""
+    spec = ContainerSpec(
+        name="sanduk-x",
+        image="sanduk:latest",
+        command=["-p", "go"],
+        mount=(Path("/tmp/w"), "/work"),
+        inherit_env=["ANTHROPIC_API_KEY"],
+        network="sanduk-net",
+    )
+    apple = get_runtime("apple").run_argv(spec)
+    docker = get_runtime("docker").run_argv(spec)
+    assert apple[1:] == docker[1:]
+    assert (apple[0], docker[0]) == ("container", "docker")
+
+
+def test_only_docker_explains_a_gateway_that_will_not_bind():
+    """The VM case is the one --proxy failure a user cannot diagnose from the
+    address alone."""
+    assert "VM" in get_runtime("docker").gateway_hint
+    assert get_runtime("apple").gateway_hint == ""
+
+
+# --- listing containers -----------------------------------------------------
+
+
+APPLE_LIST = (
+    "ID                IMAGE           OS     ARCH   STATE    IP\n"
+    "sanduk-e859b868   sanduk-hax:latest  linux  arm64  running  192.168.128.5/24\n"
+    "sanduk-hold-0af2  sanduk-hax:latest  linux  arm64  running  192.168.128.2/24\n"
+    "buildkit          builder:0.13.0     linux  arm64  running  192.168.64.2/24\n"
+)
+DOCKER_LIST = (
+    "sanduk-e859b868\tsanduk-hax:latest\trunning\nbuildkit\tbuilder:0.13.0\trunning\n"
+)
+
+
+def test_apple_lists_containers_by_column(monkeypatch):
+    responses(monkeypatch, stdout=APPLE_LIST)
+    names = [c.name for c in get_runtime("apple").list_containers("sanduk-")]
+    assert names == ["sanduk-e859b868", "sanduk-hold-0af2"]
+
+
+def test_docker_lists_containers_by_format(monkeypatch):
+    calls = responses(monkeypatch, stdout=DOCKER_LIST)
+    found = get_runtime("docker").list_containers("sanduk-")
+    assert [(c.name, c.image, c.state) for c in found] == [
+        ("sanduk-e859b868", "sanduk-hax:latest", "running")
+    ]
+    assert "{{.Names}}\t{{.Image}}\t{{.State}}" in calls[0]
+
+
+def test_an_empty_prefix_lists_everything(monkeypatch):
+    responses(monkeypatch, stdout=DOCKER_LIST)
+    assert len(get_runtime("docker").list_containers()) == 2
+
+
+@pytest.mark.parametrize("engine", ["apple", "docker"])
+def test_a_failed_listing_is_empty_not_an_error(monkeypatch, engine):
+    """Teardown calls this. Raising there would strand a container."""
+    responses(monkeypatch, returncode=1, stdout=DOCKER_LIST)
+    assert get_runtime(engine).list_containers("sanduk-") == []
+
+
+# --- images, networks, and the engine's own service --------------------------
+
+
+@pytest.mark.parametrize(("engine", "verb"), [("apple", "delete"), ("docker", "rm")])
+def test_the_delete_verb_covers_images_and_networks(monkeypatch, engine, verb):
+    """One split, three resources: `container delete` against `docker rm`."""
+    calls = responses(monkeypatch)
+    e = get_runtime(engine)
+    e.delete_image("sanduk:latest")
+    e.delete_network("sanduk-net")
+    assert calls[0][1:] == ["image", verb, "sanduk:latest"]
+    assert calls[1][1:] == ["network", verb, "sanduk-net"]
+
+
+def test_an_engine_without_a_service_command_says_so():
+    """Docker's daemon belongs to launchd, systemd, or Desktop. Pretending to
+    start it would fail somewhere less obvious."""
+    for call in (get_runtime("docker").service_start, get_runtime("docker").service_stop):
+        with pytest.raises(AgentboxError, match="managed outside sanduk"):
+            call()
+
+
+def test_apple_owns_its_service_commands(monkeypatch):
+    calls = responses(monkeypatch)
+    get_runtime("apple").service_start()
+    assert calls[0] == ["container", "system", "start"]
+
+
+def test_service_status_answers_rather_than_raising(monkeypatch):
+    """`system status` exists to report a broken engine, so it must not need a
+    working one."""
+    monkeypatch.setattr(runtime.shutil, "which", lambda _: None)
+    assert "not found on PATH" in get_runtime("docker").service_status()

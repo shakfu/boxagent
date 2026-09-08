@@ -76,6 +76,15 @@ ARCHITECTURAL = {
     "validate_key",
 }
 
+# Top-level names the two copies share by accident rather than by purpose. The
+# script is one module, so its container teardown is a bare destroy(); the
+# package's bare destroy() is the `sanduk destroy` command and its teardown is
+# Runtime.destroy. Comparing those two compares nothing. `run` is the same
+# accident pointing the other way: definitions() merges the package's modules in
+# file order, so util.run overwrites cli.run and the comparison happens to land
+# on the pair that was meant.
+COLLIDING = {"destroy"}
+
 PACKAGE = pathlib.Path(__file__).parent.parent / "src" / "sanduk"
 
 
@@ -137,7 +146,7 @@ def test_shared_logic_has_not_drifted():
     script, package = _both_sides()
     shared = set(script) & set(package)
     drifted = {n for n in shared if script[n] != package[n]}
-    drifted -= ARCHITECTURAL | BEHAVIOURAL
+    drifted -= ARCHITECTURAL | BEHAVIOURAL | COLLIDING
     assert not drifted, f"script and package disagree on: {sorted(drifted)}"
 
 

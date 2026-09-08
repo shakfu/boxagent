@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Lint, format and types are platform-independent, so they run once rather
+  # than once per matrix cell.
+  qa:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run ruff check src/ tests/
+      - run: uv run ruff format --check src/ tests/
+      - run: uv run mypy src/sanduk
+
+  # The declared bounds only. A middle version earns a cell when it breaks.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.14"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run pytest -q
+
+  # The only configuration that can prove --proxy: a daemon on this kernel, so
+  # the bridge gateway is an address the relay can bind. Apple's engine and
+  # Docker Desktop both keep the bridge inside a VM, which is why no macOS
+  # runner can stand in for this.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+
+      # hax rather than claude: a static binary and a debian base, against a
+      # node image plus an npm install.
+      - name: Build the agent image
+        run: make image AGENT=hax ENGINE=docker
+
+      - name: Integration suite against a real daemon
+        env:
+          RUNTIME: docker
+          AGENT: hax
+          IMAGE: sanduk-hax:latest
+          NETWORK: sanduk-ci
+        run: uv run pytest -q -m container
+
+      - name: Tear down
+        if: always()
+        run: docker network rm sanduk-ci || true

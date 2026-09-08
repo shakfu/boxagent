@@ -64,7 +64,7 @@ class MyAgent(Agent):
 Run it without packaging anything:
 
 ```sh
-sanduk 'Review this.' --agent mypkg.handlers:MyAgent --provider openai --proxy
+sanduk run 'Review this.' --agent mypkg.handlers:MyAgent --provider openai --proxy
 ```
 
 Or advertise it, and it appears in `--agent` by name:

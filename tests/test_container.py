@@ -3,25 +3,35 @@
 
 They make no API calls: the relay is proved by the 401 an invalid key earns from
 the real endpoint, which is itself proof the request got there.
+
+RUNTIME, AGENT, IMAGE and NETWORK select what is booted, so the same suite runs
+against Apple `container` on macOS and against Docker on Linux. Docker on a
+native daemon is the only configuration that can prove --proxy at all: Apple's
+engine and Docker Desktop both keep the bridge inside a VM.
 """
 
 import json
 import os
-import shutil
 import subprocess
 
 import pytest
 
 from sanduk import proxy
+from sanduk.agent import get_agent
+from sanduk.errors import AgentboxError
 from sanduk.runtime import get_runtime, wait_for_gateway
-from sanduk.util import run
 
 pytestmark = pytest.mark.container
 
 ENGINE = get_runtime(os.environ.get("RUNTIME", "apple"))
-IMAGE = os.environ.get("IMAGE", "sanduk:latest")
+AGENT = get_agent(os.environ.get("AGENT", "claude"))
+IMAGE = os.environ.get("IMAGE", AGENT.image)
 NETWORK = os.environ.get("NETWORK", "sanduk-net")
 FAKE_KEY = "sk-ant-api03-REAL-KEY-STAYS-ON-HOST"
+
+# What each agent's --version prints. Test-local: an agent handler has no
+# business declaring a string that exists only to be asserted here.
+VERSION_MARKER = {"claude": "Claude Code", "hax": "hax"}
 
 
 def sh(script, network=None, env=None):
@@ -38,11 +48,13 @@ def sh(script, network=None, env=None):
 
 @pytest.fixture(scope="module", autouse=True)
 def engine_running():
-    if not shutil.which(ENGINE.cli):
-        pytest.skip(f"`{ENGINE.cli}` is not installed")
-    st = run([ENGINE.cli, "system", "status"], capture_output=True)
-    if st.returncode != 0 or "running" not in st.stdout:
-        pytest.skip("container system is not running (`make system-start`)")
+    # require() is the engine's own readiness check. Calling `system status`
+    # here instead assumed Apple's CLI, and skipped every Docker run with a
+    # message about a service Docker does not have.
+    try:
+        ENGINE.require()
+    except AgentboxError as e:
+        pytest.skip(str(e))
     if not ENGINE.image_exists(IMAGE):
         pytest.skip(f"{IMAGE} is not built (`make image`)")
 
@@ -58,11 +70,11 @@ def isolated_network():
         ENGINE.destroy(holder)
 
 
-def test_image_has_a_working_claude():
+def test_the_image_runs_its_agent():
     out = subprocess.run(
         [ENGINE.cli, "run", "--rm", IMAGE, "--version"], capture_output=True, text=True
     )
-    assert "Claude Code" in out.stdout
+    assert VERSION_MARKER[AGENT.name] in out.stdout
 
 
 def test_default_network_reaches_the_internet():
@@ -139,11 +151,8 @@ def test_relay_injects_the_key_and_reaches_the_real_endpoint(isolated_network):
         srv.shutdown()
 
 
-def test_no_boxagent_containers_are_left_behind():
-    out = run([ENGINE.cli, "list", "-a"], capture_output=True)
+def test_no_sanduk_containers_are_left_behind():
     leftovers = [
-        line.split()[0]
-        for line in out.stdout.splitlines()[1:]
-        if line.startswith("sanduk-") and "hold" not in line.split()[0]
+        c.name for c in ENGINE.list_containers("sanduk-") if "hold" not in c.name
     ]
     assert leftovers == [], f"orphans: {leftovers}"

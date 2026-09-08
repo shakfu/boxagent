@@ -4,10 +4,15 @@ Every subprocess call to a container engine lives here, so adding Docker or
 Podman is a subclass plus a registry entry rather than a grep for "container"
 across the package.
 
-Only Apple's `container` is implemented. A second engine must supply four
-things: the CLI name, the verb that deletes a container (`rm`, not `delete`),
-how `network inspect` reports the gateway, and whether the host bridge needs a
-placeholder container to exist at all.
+Apple's `container` and `docker` are implemented. A third engine must supply
+four things: the CLI name, the verb that deletes a container (`rm`, not
+`delete`), how `network inspect` reports the gateway, and whether the host
+bridge needs a placeholder container to exist at all.
+
+`run_argv` is shared, which is not an accident of the two engines happening to
+agree: `--name`, `--cpus`, `--memory`, `-v`, `-w`, `-e`, `--network` and
+`--entrypoint` are the Docker CLI surface that Apple's engine adopted, and a
+third engine that wants a different one overrides the method.
 """
 
 from __future__ import annotations
@@ -22,6 +27,19 @@ from pathlib import Path
 
 from sanduk.errors import AgentboxError
 from sanduk.util import note, run
+
+# Every container sanduk starts is named from this, and every container it will
+# stop or delete is found by it. Nothing else is touched.
+CONTAINER_PREFIX = "sanduk-"
+
+
+@dataclass(frozen=True)
+class Container:
+    """One container as sanduk sees it, whatever the engine's columns say."""
+
+    name: str
+    image: str
+    state: str
 
 
 @dataclass
@@ -51,6 +69,10 @@ class Runtime:
     # vmnet-style engines only create the host bridge while a container is
     # attached; Docker and Podman create it with the network.
     needs_network_holder = False
+    # Appended when the relay cannot bind the gateway, where an engine knows a
+    # likely reason. --proxy is the whole point of sanduk, so a failure there
+    # has to say what to do about it.
+    gateway_hint = ""
 
     # --- preflight ----------------------------------------------------------
 
@@ -62,10 +84,38 @@ class Runtime:
     def require_service(self) -> None:
         """Engines with a background daemon check it here."""
 
+    # --- the engine's own service -------------------------------------------
+
+    def service_status(self) -> str:
+        """One line: whether this engine can take a container right now."""
+        try:
+            self.require()
+        except AgentboxError as e:
+            return str(e)
+        return f"{self.cli} is running"
+
+    def _unmanaged(self) -> AgentboxError:
+        return AgentboxError(
+            f"{self.cli}'s service is managed outside sanduk. Start or stop it "
+            "the way your system does."
+        )
+
+    def service_start(self) -> None:
+        raise self._unmanaged()
+
+    def service_stop(self) -> None:
+        raise self._unmanaged()
+
     # --- images -------------------------------------------------------------
 
     def image_exists(self, image: str) -> bool:
         raise NotImplementedError
+
+    def delete_image(self, image: str) -> None:
+        # `image delete` against `image rm`: the same split as containers, so
+        # the same verb answers for both.
+        r = run([self.cli, "image", self.delete_verb, image], capture_output=True)
+        note(f"deleted image {image}" if r.returncode == 0 else f"no image {image}")
 
     def build_image(self, image: str, containerfile: Path | str) -> None:
         cf = Path(containerfile).resolve()
@@ -96,6 +146,10 @@ class Runtime:
             raise AgentboxError(f"network {name} created but has no address")
         return info
 
+    def delete_network(self, name: str) -> None:
+        r = run([self.cli, "network", self.delete_verb, name], capture_output=True)
+        note(f"deleted network {name}" if r.returncode == 0 else f"no network {name}")
+
     def hold_network_up(self, network: str, image: str) -> str | None:
         """Start a placeholder container so the host bridge exists.
 
@@ -121,6 +175,16 @@ class Runtime:
         return spec.name
 
     # --- containers ---------------------------------------------------------
+
+    def list_containers(self, prefix: str = "") -> list[Container]:
+        """Containers whose name starts with `prefix`, running or not."""
+        raise NotImplementedError
+
+    def shell_argv(self, image: str) -> list[str]:
+        """An interactive shell in `image`, mounting nothing and joining no
+        network. Not run_argv: that builds no tty, and the caller hands this
+        straight to the terminal rather than reading a JSON stream off it."""
+        return [self.cli, "run", "--rm", "-it", "--entrypoint", "sh", image]
 
     def run_argv(self, spec: ContainerSpec) -> list[str]:
         argv = [
@@ -151,6 +215,10 @@ class Runtime:
         argv.append(spec.image)
         return argv + spec.command
 
+    def stop(self, name: str) -> None:
+        """Stop a container, leaving it on disk. Already stopped is not an error."""
+        run([self.cli, "stop", name], capture_output=True)
+
     def destroy(self, name: str, keep: bool = False) -> None:
         if keep:
             note(
@@ -158,7 +226,7 @@ class Runtime:
                 f"the API key; `{self.cli} {self.delete_verb} {name}` when done)"
             )
             return
-        run([self.cli, "stop", name], capture_output=True)
+        self.stop(name)
         r = run([self.cli, self.delete_verb, name], capture_output=True)
         if r.returncode != 0:
             note(f"could not delete {name}: {r.stderr.strip()}")
@@ -182,6 +250,15 @@ class AppleContainer(Runtime):
                 "container system is not running. Start it with: container system start"
             )
 
+    def service_start(self) -> None:
+        if run([self.cli, "system", "start"]).returncode != 0:
+            raise AgentboxError("could not start the container service")
+
+    def service_stop(self) -> None:
+        note("this stops the service for everything on the machine, not just sanduk")
+        if run([self.cli, "system", "stop"]).returncode != 0:
+            raise AgentboxError("could not stop the container service")
+
     def image_exists(self, image: str) -> bool:
         out = run([self.cli, "image", "list"], capture_output=True)
         if out.returncode != 0:
@@ -204,8 +281,87 @@ class AppleContainer(Runtime):
         except (ValueError, KeyError, IndexError):
             return None
 
+    def list_containers(self, prefix: str = "") -> list[Container]:
+        # Columns, because this CLI has no --format. ID IMAGE OS ARCH STATE ...
+        r = run([self.cli, "list", "-a"], capture_output=True)
+        if r.returncode != 0:
+            return []
+        out = []
+        for line in r.stdout.splitlines()[1:]:
+            f = line.split()
+            if len(f) >= 5 and f[0].startswith(prefix):
+                out.append(Container(name=f[0], image=f[1], state=f[4]))
+        return out
 
-RUNTIMES: dict[str, type[Runtime]] = {"apple": AppleContainer}
+
+class Docker(Runtime):
+    """The Docker CLI against a local daemon.
+
+    Two verbs differ from Apple's: `rm` deletes a container, and the gateway
+    comes out of the IPAM block rather than a status object. The bridge is
+    created with the network, so no placeholder container is needed.
+
+    `--proxy` needs the bridge gateway to be an address on this host. That
+    holds for a daemon on this kernel and not for one inside a VM -- Docker
+    Desktop, Colima, Lima -- where the bridge lives in the VM. There the bind
+    fails and the run stops, rather than the relay silently listening somewhere
+    the container cannot reach.
+    """
+
+    name = "docker"
+    cli = "docker"
+    delete_verb = "rm"
+    install_hint = "Install from docs.docker.com/get-docker/."
+    needs_network_holder = False
+    gateway_hint = (
+        " A daemon inside a VM (Docker Desktop, Colima, Lima) keeps the bridge "
+        "in the VM rather than on this host; --proxy needs a daemon running on "
+        "this kernel."
+    )
+
+    def require_service(self) -> None:
+        r = run([self.cli, "info", "--format", "{{.ServerVersion}}"], capture_output=True)
+        if r.returncode != 0:
+            raise AgentboxError(
+                "the docker daemon is not reachable. Start it, then re-run."
+            )
+
+    def image_exists(self, image: str) -> bool:
+        # inspect rather than a parsed listing: it answers the same for a tag, a
+        # digest and an id, and the exit status is the answer.
+        return (
+            run([self.cli, "image", "inspect", image], capture_output=True).returncode
+            == 0
+        )
+
+    def network_info(self, name: str) -> tuple[str, str] | None:
+        r = run([self.cli, "network", "inspect", name], capture_output=True)
+        if r.returncode != 0:
+            return None
+        try:
+            config = json.loads(r.stdout)[0]["IPAM"]["Config"][0]
+            return str(config["Gateway"]), str(config["Subnet"])
+        except (ValueError, KeyError, IndexError):
+            return None
+
+    def list_containers(self, prefix: str = "") -> list[Container]:
+        # --format over columns: a named field cannot shift under a value that
+        # contains a space, and an unknown field fails loudly at the template.
+        r = run(
+            [self.cli, "ps", "-a", "--format", "{{.Names}}\t{{.Image}}\t{{.State}}"],
+            capture_output=True,
+        )
+        if r.returncode != 0:
+            return []
+        out = []
+        for line in r.stdout.splitlines():
+            f = line.split("\t")
+            if len(f) == 3 and f[0].startswith(prefix):
+                out.append(Container(name=f[0], image=f[1], state=f[2]))
+        return out
+
+
+RUNTIMES: dict[str, type[Runtime]] = {"apple": AppleContainer, "docker": Docker}
 DEFAULT_RUNTIME = "apple"
 
 
