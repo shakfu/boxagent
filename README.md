@@ -1,5 +1,7 @@
 # sanduk
 
+'sanduk', pronounced SAN-dook, means 'box' in Arabic.
+
 Run an agent inside a disposable container. The agent does its work, writes a report to a bind-mounted directory, and the container is deleted.
 
 Today that means Claude Code on macOS through Apple's [`container`](https://github.com/apple/container). The container engine sits behind `sanduk.runtime.Runtime` and the agent CLI behind `sanduk.agent`, so Docker, Podman, and other agents are additive.
@@ -7,8 +9,6 @@ Today that means Claude Code on macOS through Apple's [`container`](https://gith
 Four providers are supported: Anthropic, OpenAI, OpenRouter, and any OpenAI-compatible server, which includes a local `llama-server`. See [Providers](#providers).
 
 In its stronger mode the VM has no route off the host and never holds the API key: a host-side relay injects the credential, and the container gets a per-run token that is worthless anywhere else. Against a local model there is no key to hold, and nothing leaves the machine at all.
-
-'sanduk', pronounced SAN-dook, means 'box' in Arabic.
 
 ## Requirements
 

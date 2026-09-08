@@ -4,6 +4,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Nothing
 
 ## [Unreleased]
 
+## [0.2.0]
+
 ### Added
 
 - `destroy` and `system status|start|stop`, which empties the Makefile of engine names: `ENGINE` and `CONTAINERFILE` are gone rather than parameterised. `sanduk destroy` deletes the containers, the image and the network, and deliberately not the `--log-bodies` directory: that is written outside the bind mount so the agent cannot edit its own audit trail, and a cleanup verb removing it would undo the reason it is there. `make destroy` still deletes it, as an explicit `rm -rf` where it reads as the file operation it is. `service_status` is generic -- it reports what `require` finds, so it answers for an engine that is not working, which is the case it exists for -- while `service_start` and `service_stop` raise unless an engine owns them. Docker's daemon belongs to launchd, systemd or Desktop, and says so instead of pretending.
