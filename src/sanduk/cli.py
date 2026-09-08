@@ -18,6 +18,7 @@ import os
 import secrets
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -48,6 +49,7 @@ from sanduk.providers import (
     parse_upstream,
 )
 from sanduk.proxy import ProxyServer, start_proxy
+from sanduk.runs import Run, claim, sweep
 from sanduk.runtime import (
     CONTAINER_PREFIX,
     DEFAULT_RUNTIME,
@@ -444,7 +446,7 @@ def show(args: argparse.Namespace) -> int:
     if args.axis == "agents":
         for name, agent in sorted(registry().items()):
             protocols = ", ".join(sorted(agent.protocols))
-            print(f"{name:8}  {agent.image:20}  {protocols}")
+            print(f"{name:9}  {agent.image:24}  {protocols}")
     elif args.axis == "providers":
         for name, provider in sorted(PROVIDERS.items()):
             url = f"{provider.scheme}://{provider.host}{provider.api_prefix}"
@@ -540,7 +542,7 @@ def build_spec(
     return ContainerSpec(
         name=name,
         image=sel.image,
-        command=sel.agent.argv(args, sel.provider, task),
+        command=sel.agent.argv(args, sel.provider, task, wiring),
         cpus=args.cpus,
         memory=args.memory,
         mount=(workdir, "/work"),
@@ -560,6 +562,15 @@ def read_task(args: argparse.Namespace) -> str:
     if not args.no_report_instruction:
         task += REPORT_INSTRUCTION.format(report=REPORT_NAME)
     return task
+
+
+def _exit_on_signal(signum: int, _frame: object) -> None:
+    """Turn a terminating signal into the exception the teardown path catches.
+
+    SIGKILL cannot be caught at all, which is what the run records in
+    `sanduk.runs` are for: the next run deletes what this one could not.
+    """
+    raise SystemExit(128 + signum)
 
 
 def run(args: argparse.Namespace) -> int:
@@ -584,6 +595,7 @@ def run(args: argparse.Namespace) -> int:
         validate_key(key, api_url if args.proxy else (args.base_url or api_url), provider)
 
     name = f"{CONTAINER_PREFIX}{uuid.uuid4().hex[:8]}"
+    record: Run | None = None if args.dry_run else claim(args.runtime, name)
     network: str | None = args.network
     proxy_srv: ProxyServer | None = None
     holder: str | None = None
@@ -601,6 +613,8 @@ def run(args: argparse.Namespace) -> int:
             if args.rebuild or not runtime.image_exists(sel.image):
                 runtime.build_image(sel.image, sel.containerfile)
             holder = runtime.hold_network_up(network, sel.image)
+            if holder and record:
+                record.add(holder)
             if not wait_for_gateway(gateway):
                 if holder:
                     runtime.destroy(holder)
@@ -634,6 +648,7 @@ def run(args: argparse.Namespace) -> int:
         return 0
 
     runtime.require()
+    sweep()
     if args.rebuild or not runtime.image_exists(sel.image):
         runtime.build_image(sel.image, sel.containerfile)
 
@@ -644,15 +659,24 @@ def run(args: argparse.Namespace) -> int:
         )
     note(f"{name} -> {workdir}")
     started = time.monotonic()
+    # SIGTERM and SIGHUP kill this process with no teardown otherwise, which is
+    # the same leak SIGKILL causes and the only one that can be closed here.
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, _exit_on_signal)
     try:
         outcome, rc = launch(sel.agent, cmd, args.timeout, args.quiet, env=child_env)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit) as e:
         runtime.destroy(name)
-        raise AgentboxError("interrupted", code=130) from None
+        code = e.code if isinstance(e, SystemExit) and isinstance(e.code, int) else 130
+        raise AgentboxError("interrupted", code=code) from None
     except AgentboxError:
         # A timeout kill must not leave a container alive holding the key.
         runtime.destroy(name)
         raise
+    else:
+        # Before the record is released, so a kill in between still leaves the
+        # container owned and reapable.
+        runtime.destroy(name, args.keep)
     finally:
         if proxy_srv:
             proxy_srv.shutdown()
@@ -660,7 +684,8 @@ def run(args: argparse.Namespace) -> int:
             note(f"proxy relayed {cfg.requests}, rejected {cfg.rejected}")
         if holder:
             runtime.destroy(holder)
-    runtime.destroy(name, args.keep)
+        if record:
+            record.release()
 
     note(f"{time.monotonic() - started:.1f}s wall")
     if outcome:

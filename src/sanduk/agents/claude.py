@@ -64,7 +64,9 @@ class ClaudeCode(Agent):
     containerfile = RESOURCES / "Containerfile.claude"
     protocols = frozenset({ANTHROPIC_MESSAGES})
 
-    def argv(self, args: argparse.Namespace, provider: Provider, task: str) -> list[str]:
+    def argv(
+        self, args: argparse.Namespace, provider: Provider, task: str, wiring: Wiring
+    ) -> list[str]:
         argv = ["-p", task, "--output-format", "stream-json", "--verbose"]
         if args.bare:
             argv.append("--bare")

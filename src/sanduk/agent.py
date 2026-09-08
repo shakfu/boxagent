@@ -131,14 +131,27 @@ class Agent(ABC):
             )
 
     @abstractmethod
-    def argv(self, args: argparse.Namespace, provider: Provider, task: str) -> list[str]:
-        """Flags appended after the image in the container argv."""
-
-    @abstractmethod
     def wire(
         self, args: argparse.Namespace, provider: Provider, root: str | None
     ) -> Wiring:
         """Where the agent finds its endpoint. `root` is scheme://host[:port]."""
+
+    @abstractmethod
+    def argv(
+        self,
+        args: argparse.Namespace,
+        provider: Provider,
+        task: str,
+        wiring: Wiring,
+    ) -> list[str]:
+        """Flags appended after the image in the container argv.
+
+        `wiring` is this run's own, already resolved: an agent that takes its
+        endpoint as a command-line option rather than from the environment
+        reads it from there. Nothing secret belongs in the result -- the
+        credential reaches the container through `Wiring.key_env`, and this
+        argv is visible to `inspect`.
+        """
 
     @abstractmethod
     def reader(self) -> Reader:
@@ -223,7 +236,14 @@ def launch(
     would never trip a deadline checked inside the read loop.
     """
     reader = agent.reader()
-    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, text=True, bufsize=1, env=env)
+    proc = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+        env=env,
+    )
     timed_out = threading.Event()
 
     def expire() -> None:
@@ -245,7 +265,8 @@ def launch(
                 continue
             reader.event(record, quiet)
         proc.wait(timeout=30)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
+        # Killing the client does not stop the container; the caller deletes it.
         proc.kill()
         raise
     finally:

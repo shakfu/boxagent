@@ -4,7 +4,7 @@
 
 sanduk is a Python CLI tool and package that makes it easy to run an agent inside a disposable container. The agent does its work, writes a report to a bind-mounted directory, and when it’s finished, the container is deleted.
 
-Two agents ship: Claude Code and [hax](https://github.com/OleksandrChekhovskyi/hax). Two container engines: Apple's [`container`](https://github.com/apple/container) on macOS, and `docker`. Each sits behind a registry -- an agent behind `sanduk.agent.Agent`, an engine behind `sanduk.runtime.Runtime` -- so a third of either is one class. An agent can live in your own package and be found by entry point; see [docs/agents.md](docs/agents.md). Podman is not implemented.
+Four agents ship: Claude Code, [codex](https://github.com/openai/codex), [hax](https://github.com/OleksandrChekhovskyi/hax), and [opencode](https://github.com/sst/opencode). Two container engines: Apple's [`container`](https://github.com/apple/container) on macOS, and `docker`. Each sits behind a registry -- an agent behind `sanduk.agent.Agent`, an engine behind `sanduk.runtime.Runtime` -- so another of either is one class. An agent can live in your own package and be found by entry point; see [docs/agents.md](docs/agents.md). Podman is not implemented.
 
 Four providers are supported: Anthropic, OpenAI, OpenRouter, and any OpenAI-compatible server, which includes a local `llama-server`. See [Providers](#providers).
 
@@ -24,7 +24,7 @@ In its stronger mode the container has no route off the host and never holds the
 
 Apple's `container` runs **Linux** containers as lightweight VMs. There is no such thing as a macOS container here; anything needing Xcode or the macOS toolchain cannot be the workload.
 
-Each agent has its own image. Claude Code's is `node:22-slim`; hax's is `debian:trixie-slim` with no language runtime, since the binary is static. Both add `git`, `ripgrep`, `curl`, `jq`, and `python3`. The agent can only run what is in it. Without an interpreter it falls back to hand-tracing and still writes a confident report, so check whether the findings say they were reproduced. There is no C, Go, or Rust toolchain: point `--image` at your own, or `--containerfile` at one to build.
+Each agent has its own image. Claude Code, codex and opencode run on `node:22-slim`; hax's is `debian:trixie-slim` with no language runtime, since the binary is static. All add `git`, `ripgrep`, `curl`, `jq`, and `python3`. The agent can only run what is in it. Without an interpreter it falls back to hand-tracing and still writes a confident report, so check whether the findings say they were reproduced. There is no C, Go, or Rust toolchain: point `--image` at your own, or `--containerfile` at one to build.
 
 ## Quickstart
 
@@ -99,18 +99,20 @@ sanduk run 'Review this.' -w ./repo --proxy \
 
 `--upstream` takes `scheme://host:port` and no path. Plaintext `http://` to anything but a loopback address is refused, because the relay writes the real key into every forwarded request; `--insecure-upstream` overrides. OpenRouter's `/api/v1` prefix lives in the allowlist, not the upstream.
 
-The relay only forwards. It does not translate between protocols, so the agent has to speak the provider's own API. Claude Code speaks Anthropic Messages only, so `--provider openai|openrouter|openai-compat` needs `--agent hax`; the pairing is refused before anything is built rather than 404'd by the relay later.
+The relay only forwards. It does not translate between protocols, so the agent has to speak the provider's own API. Claude Code speaks Anthropic Messages only; codex speaks OpenAI Responses only. `sanduk list agents` prints what each handler speaks, and a pairing no protocol supports is refused before anything is built rather than 404'd by the relay later.
 
 `--agent-key-env` and `--agent-base-url-env` name the variables the agent reads inside the container. They default to the provider's. They are separate because sanduk reads the key on the host under one name and the container may want another, which is what makes an arbitrary agent a matter of two flags rather than a new module.
 
 ## Agents
 
 ```text
---agent claude   Claude Code       anthropic only
---agent hax      hax               every provider
+--agent claude     Claude Code   anthropic
+--agent codex      codex         openai, openai-compat
+--agent hax        hax           every provider
+--agent opencode   opencode      every provider
 ```
 
-A handler says which image carries the agent, what flags drive it headlessly, which variables it reads its endpoint from, and how to read its JSON stream. Nothing else about a run differs, so a third agent is a class in your own package, advertised in the `sanduk.agents` entry-point group or named directly as `--agent mypkg.handlers:MyAgent`. See [docs/agents.md](docs/agents.md).
+A handler says which image carries the agent, what flags drive it headlessly, which variables it reads its endpoint from, and how to read its JSON stream. Nothing else about a run differs, so a fifth agent is a class in your own package, advertised in the `sanduk.agents` entry-point group or named directly as `--agent mypkg.handlers:MyAgent`. See [docs/agents.md](docs/agents.md).
 
 ```text
 sanduk run 'Review this.' -w ./repo --proxy --agent hax \
@@ -118,6 +120,10 @@ sanduk run 'Review this.' -w ./repo --proxy --agent hax \
 ```
 
 hax is a static C binary with no approval gate, which suits a container that is already the boundary. The image carries no language runtime. `--allowed-tools` and `--permission-mode` are Claude Code flags and are refused rather than dropped.
+
+codex accepts only `wire_api = "responses"`, so it pairs with `openai` or with an `openai-compat` server that answers `/v1/responses`. It has no base-URL variable: sanduk passes the endpoint as a `-c model_providers...` override, which is why `argv` is handed the run's wiring. Its own sandbox is disabled with `--sandbox danger-full-access`, since the container is the boundary and codex's sandbox would only stop the work; `--skip-git-repo-check` is passed because the bind mount is usually not a repository.
+
+opencode takes its whole configuration from `OPENCODE_CONFIG_CONTENT`, so no `opencode.json` is written into the bind mount, where it would sit in your repository and be editable by the agent reading it. The provider block picks an npm driver by wire protocol: `@ai-sdk/anthropic` for Messages, `@ai-sdk/openai-compatible` for Chat Completions. Both are installed in the image, because the proxy network has no route to fetch one at runtime. `--model` is required: the config names one model and there is nothing to put in it otherwise.
 
 ## How --proxy works
 
@@ -141,6 +147,8 @@ hax is a static C binary with no approval gate, which suits a container that is 
 
 `--dry-run` prints the `container run` command and exits. `--keep` leaves the container for inspection, and warns that `container inspect` then exposes the token.
 
+A run records the containers it owns, and its own pid, under `$XDG_STATE_HOME/sanduk/runs` (`~/.local/state` by default). Every run first deletes the containers of records whose owner process is gone. SIGKILL cannot be caught, so a killed run cannot delete its own container -- the next run does it, and until then the container is alive holding the run token. SIGTERM and SIGHUP are caught and tear down in place. `--keep` releases the record, so a container you asked to keep is never swept. A state directory that cannot be written stops the run before it starts.
+
 ## Layout
 
 ```text
@@ -149,15 +157,18 @@ src/sanduk/
     runtime.py     container engines; ContainerSpec; `apple` and `docker`
     providers.py   provider records, wire protocols, route tables
     agent.py       the agent strategy: interface, registry, plugin loading
-    agents/        the shipped handlers: claude.py, hax.py
+    runs.py        which process owns which container; the orphan sweep
+    agents/        the shipped handlers: claude.py, codex.py, hax.py, opencode.py
     proxy.py       the host-side relay
     preflight.py   key validation, macOS firewall check
     resources/
         Containerfile.claude
+        Containerfile.codex
         Containerfile.hax
+        Containerfile.opencode
 ```
 
-A second agent is an `Agent` subclass in any package; see [docs/agents.md](docs/agents.md). A third engine is a `Runtime` subclass and a `RUNTIMES` entry. It must supply four things: the CLI name, the verb that deletes a container (`rm`, not `delete`), how `network inspect` reports the gateway, and whether the host bridge needs a placeholder container to exist at all.
+Another agent is an `Agent` subclass in any package; see [docs/agents.md](docs/agents.md). A third engine is a `Runtime` subclass and a `RUNTIMES` entry. It must supply four things: the CLI name, the verb that deletes a container (`rm`, not `delete`), how `network inspect` reports the gateway, and whether the host bridge needs a placeholder container to exist at all.
 
 `--runtime docker` needs a daemon on this kernel, not one in a VM. Docker Desktop, Colima and Lima keep the bridge inside the VM, so the relay cannot bind the gateway; the run stops at the bind with that reason rather than listening somewhere the container cannot reach. `--runtime apple` is the macOS path.
 

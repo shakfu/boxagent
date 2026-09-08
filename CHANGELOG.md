@@ -4,6 +4,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Nothing
 
 ## [Unreleased]
 
+## [0.2.1]
+
+### Added
+
+- `--agent codex` and `--agent opencode`. Both learn their endpoint differently from the two that shipped before, which is what forced `argv` to take the wiring. codex has no base-URL variable at all: sanduk names a `model_providers.sanduk` block on the command line with `-c`, and only the key travels in the environment. opencode has no variable either, but takes its whole configuration as JSON in `OPENCODE_CONFIG_CONTENT`; writing an `opencode.json` into the bind mount instead would put it in the user's repository, editable by the agent reading it. codex accepts only `wire_api = "responses"`, so `check` refuses `anthropic` and `openrouter`. opencode reaches every provider, picking an npm driver by wire protocol -- `@ai-sdk/anthropic` or `@ai-sdk/openai-compatible`, both baked into the image because the proxy network cannot fetch one -- and requires `--model`, since its config names exactly one. Both images keep codex's and opencode's own sandbox and approval gates off: the container is the boundary, and a second one inside it only blocks the work.
+
+- `/v1/responses` on `openai-compat`, measured against llama-server build 10850. The route table is the egress allowlist, so without the entry a Responses-only agent could not reach a local model at all.
+
+- Run records and an orphan sweep. A run writes the containers it owns and its own pid to `$XDG_STATE_HOME/sanduk/runs`; every later run deletes the containers of records whose owner is gone. A run killed with SIGKILL runs no teardown, so it left its container alive with the run token inside it, and a `--proxy` run left the network holder as well. Nothing can reap at kill time, so the next run does it. What marks a container reapable is the record, not the `sanduk-` prefix: `--keep` releases it, and a pid whose number has been reused reads as alive, which skips the sweep rather than deleting a container another process is using. A state directory that cannot be written -- no `HOME`, no write permission -- stops the run. Warning and running on without a record would restore the leak this closes, silently.
+
+- `RUNTIME` in the Makefile, passed as `--runtime` by every target that talks to an engine. `make run RUNTIME=docker` used to run against Apple's engine.
+
+### Changed
+
+- SIGTERM and SIGHUP tear the run down instead of killing the process where it stands. Both now raise `SystemExit`, which `launch` treats as `KeyboardInterrupt` does: kill the client, then delete the container. `timeout(1)` and a bare `kill` send SIGTERM, so this was the common half of the leak; SIGKILL is the other half, and the run records are what cover it.
+
+- `Agent.argv` takes the run's `Wiring`. An agent whose endpoint is a config key rather than a variable cannot be driven otherwise. Nothing secret belongs in the result: the credential reaches the container through `Wiring.key_env`, and argv is visible to `inspect`.
+
+- The agent gets `stdin=/dev/null` rather than the parent's. sanduk passes the task as an argument and reads the agent's stdout, so there is nothing to type; codex reads stdin when it is not a terminal, and an inherited one leaves it waiting on a stream nobody writes.
+
+- `IMAGE` is no longer computed in the Makefile and is exported only when set. It named the image per agent through a `hax`-or-`claude` conditional, which sent `make test-container AGENT=codex` at Claude Code's image. The integration suite already falls back to the handler's own image, so the registry is now the single source of that name.
+
+### Fixed
+
+- The CI Docker job built its image with `make image AGENT=hax ENGINE=docker`. `ENGINE` was deleted in 0.2.0, so the build ran against the default runtime, `apple`, which does not exist on a Linux runner.
+
+- codex traced every command twice. One command arrives as `item.started` and again as `item.completed`; the reader printed on any `item.` record. Commands now trace on `item.started`, messages on `item.completed`. An item whose type is `error` is traced as well, instead of being dropped -- codex reports a fatal turn as `turn.failed`, so an error item was the run's only warning and nothing showed it.
+
 ## [0.2.0]
 
 ### Added

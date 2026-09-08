@@ -1,0 +1,21 @@
+# opencode also publishes a standalone binary, but the npm package is the
+# pinnable form, and pinning matters more here than image size.
+FROM docker.io/library/node:22-slim
+
+ARG OPENCODE_VERSION=1.18.29
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git ripgrep ca-certificates curl jq python3 \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g opencode-ai@${OPENCODE_VERSION} && npm cache clean --force
+
+# The provider driver is fetched at runtime otherwise, which the proxy network
+# has no route for. Installed here so the run needs no registry.
+RUN npm install -g @ai-sdk/openai-compatible @ai-sdk/anthropic && npm cache clean --force
+
+RUN mkdir -p /work && chown node:node /work
+USER node
+ENV HOME=/home/node
+WORKDIR /work
+ENTRYPOINT ["opencode"]

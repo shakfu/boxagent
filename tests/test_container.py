@@ -12,6 +12,7 @@ engine and Docker Desktop both keep the bridge inside a VM.
 
 import json
 import os
+import re
 import subprocess
 
 import pytest
@@ -29,9 +30,16 @@ IMAGE = os.environ.get("IMAGE", AGENT.image)
 NETWORK = os.environ.get("NETWORK", "sanduk-net")
 FAKE_KEY = "sk-ant-api03-REAL-KEY-STAYS-ON-HOST"
 
-# What each agent's --version prints. Test-local: an agent handler has no
-# business declaring a string that exists only to be asserted here.
-VERSION_MARKER = {"claude": "Claude Code", "hax": "hax"}
+# A pattern each agent's --version output must match. Test-local: an agent
+# handler has no business declaring a string that exists only to be asserted
+# here. Patterns rather than substrings because opencode prints a bare version
+# and no name, so there is nothing to match on but its shape.
+VERSION_MARKER = {
+    "claude": r"Claude Code",
+    "codex": r"codex-cli",
+    "hax": r"hax",
+    "opencode": r"\d+\.\d+\.\d+",
+}
 
 
 def sh(script, network=None, env=None):
@@ -74,7 +82,7 @@ def test_the_image_runs_its_agent():
     out = subprocess.run(
         [ENGINE.cli, "run", "--rm", IMAGE, "--version"], capture_output=True, text=True
     )
-    assert VERSION_MARKER[AGENT.name] in out.stdout
+    assert re.search(VERSION_MARKER[AGENT.name], out.stdout), out.stdout
 
 
 def test_default_network_reaches_the_internet():

@@ -1,8 +1,6 @@
 # Agent handlers
 
-sanduk runs one agent CLI inside the container and reads its JSON stream. What
-that CLI is, how it is driven, and how its output is parsed live in a handler.
-Two ship: `claude` and `hax`. A third is a class you write, in your own package.
+sanduk runs one agent CLI inside the container and reads its JSON stream. What that CLI is, how it is driven, and how its output is parsed live in a handler. Four ship: `claude`, `codex`, `hax` and `opencode`. A fifth is a class you write, in your own package.
 
 ## What a handler answers
 
@@ -46,7 +44,9 @@ class MyAgent(Agent):
     containerfile = Path("/path/to/Containerfile.mine")
     protocols = frozenset({OPENAI_CHAT})
 
-    def argv(self, args, provider, task):
+    def argv(self, args, provider, task, wiring):
+        # wiring carries this run's endpoint, for an agent that takes it as an
+        # option rather than from the environment.
         return ["--json", task]
 
     def wire(self, args, provider, root):
@@ -74,30 +74,18 @@ Or advertise it, and it appears in `--agent` by name:
 mine = "mypkg.handlers:MyAgent"
 ```
 
-A plugin that fails to import is reported and skipped, and one that claims a
-shipped name is refused: replacing `claude` would change what runs in the
-container without changing the command line.
+A plugin that fails to import is reported and skipped, and one that claims a shipped name is refused: replacing `claude` would change what runs in the container without changing the command line.
 
-## Three things that are easy to get wrong
+## Four things that are easy to get wrong
 
-**The base URL prefix is yours to add.** The relay forwards paths unchanged and
-checks them against `Provider.routes`, so the base URL you hand the agent has to
-end where those routes begin. `provider.api_prefix` is that segment: `/v1` for
-most, `/api/v1` for OpenRouter. Claude Code is the exception that proves it —
-it appends `/v1/messages` itself, so its handler passes the bare root.
+**The base URL prefix is yours to add.** The relay forwards paths unchanged and checks them against `Provider.routes`, so the base URL you hand the agent has to end where those routes begin. `provider.api_prefix` is that segment: `/v1` for most, `/api/v1` for OpenRouter. Claude Code is the exception that proves it — it appends `/v1/messages` itself, so its handler passes the bare root.
 
-**A handler is stateless; a reader is not.** The registry holds handler classes
-and `launch` calls `reader()` once per run. Keep the token tally and the final
-record on the reader, or one run's counts leak into the next.
+**Not every agent reads its endpoint from a variable.** codex takes it as a `-c` config override in `argv`; opencode takes a whole JSON config through `OPENCODE_CONFIG_CONTENT`. That is why `argv` is handed the run's `Wiring`. The credential still travels in `Wiring.key_env` and is named, not inlined, in either: `argv` is visible to `inspect`, and a config file written into the bind mount would be editable by the agent reading it.
 
-**Token counts are not comparable across agents.** Claude Code reports cache
-reads outside `input_tokens`; hax normalizes them inside it. `Outcome.stats` is
-a formatted line, not a struct, because there is no shared meaning to normalize
-to.
+**A handler is stateless; a reader is not.** The registry holds handler classes and `launch` calls `reader()` once per run. Keep the token tally and the final record on the reader, or one run's counts leak into the next.
+
+**Token counts are not comparable across agents.** Claude Code reports cache reads outside `input_tokens`; hax normalizes them inside it. `Outcome.stats` is a formatted line, not a struct, because there is no shared meaning to normalize to.
 
 ## Refusing a run early
 
-`Agent.check()` runs before the image is built. The base implementation refuses
-a provider whose protocols the agent does not speak. Override it to refuse a
-flag your agent has no equivalent for — silently dropping `--allowed-tools`
-would weaken a restriction the caller asked for.
+`Agent.check()` runs before the image is built. The base implementation refuses a provider whose protocols the agent does not speak. Override it to refuse a flag your agent has no equivalent for — silently dropping `--allowed-tools` would weaken a restriction the caller asked for.

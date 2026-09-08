@@ -1,6 +1,6 @@
 [project]
 name = "sanduk"
-version = "0.2.0"
+version = "0.2.1"
 description = "Run an agent inside a disposable container"
 readme = "README.md"
 license = { text = "MIT" }
@@ -31,7 +31,9 @@ sanduk = "sanduk.cli:main"
 # a third-party handler copies.
 [project.entry-points."sanduk.agents"]
 claude = "sanduk.agents.claude:ClaudeCode"
+codex = "sanduk.agents.codex:Codex"
 hax = "sanduk.agents.hax:Hax"
+opencode = "sanduk.agents.opencode:OpenCode"
 
 [dependency-groups]
 dev = [

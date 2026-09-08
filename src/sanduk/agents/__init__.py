@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from sanduk.agent import Agent
 from sanduk.agents.claude import ClaudeCode
+from sanduk.agents.codex import Codex
 from sanduk.agents.hax import Hax
+from sanduk.agents.opencode import OpenCode
 
-BUILTIN: tuple[type[Agent], ...] = (ClaudeCode, Hax)
+BUILTIN: tuple[type[Agent], ...] = (ClaudeCode, Codex, Hax, OpenCode)
 
-__all__ = ["BUILTIN", "ClaudeCode", "Hax"]
+__all__ = ["BUILTIN", "ClaudeCode", "Codex", "Hax", "OpenCode"]

@@ -24,6 +24,7 @@ import argparse
 import http.client
 import json
 import os
+import secrets
 import shlex
 import shutil
 import socket
@@ -32,11 +33,10 @@ import sys
 import tempfile
 import threading
 import time
-import zlib
 import urllib.error
 import urllib.request
-import secrets
 import uuid
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -87,21 +87,35 @@ DEFAULT_ALLOW = frozenset({"/v1/messages", "/v1/messages/count_tokens", "/v1/mod
 
 # Headers that describe one hop and must not be relayed to the next.
 HOP = {
-    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-    "te", "trailer", "transfer-encoding", "upgrade",
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
 }
 # Credentials arriving from the container are dropped; we supply our own.
 # accept-encoding is dropped and re-offered as gzip in `relay`: the API prefers
 # brotli when a client lists it, and nothing in the standard library decodes it.
 CREDENTIAL_HEADERS = {"x-api-key", "authorization", "api-key", "x-goog-api-key"}
-STRIP_REQ = HOP | CREDENTIAL_HEADERS | {"host", "content-length",
-                                        "accept-encoding"}
+STRIP_REQ = HOP | CREDENTIAL_HEADERS | {"host", "content-length", "accept-encoding"}
 STRIP_RESP = HOP | {"content-length"}
 
 
 class Config:
-    def __init__(self, api_key, token, allow_paths, upstream, log_bodies,
-                 allow_models=None, max_tokens_cap=None, log_dir=None):
+    def __init__(
+        self,
+        api_key,
+        token,
+        allow_paths,
+        upstream,
+        log_bodies,
+        allow_models=None,
+        max_tokens_cap=None,
+        log_dir=None,
+    ):
         self.api_key = api_key
         self.token = token
         self.allow_paths = frozenset(allow_paths)
@@ -114,7 +128,6 @@ class Config:
         self.requests = 0
         self.rejected = 0
         self.lock = threading.Lock()
-
 
 
 class UsageSniffer:
@@ -134,7 +147,9 @@ class UsageSniffer:
         self._sse = "text/event-stream" in content_type
         self._buf = b""
         # wbits 47 reads the gzip header rather than assuming raw deflate.
-        self._unzip = zlib.decompressobj(47) if "gzip" in content_encoding.lower() else None
+        self._unzip = (
+            zlib.decompressobj(47) if "gzip" in content_encoding.lower() else None
+        )
 
     def feed(self, chunk):
         if self._unzip is not None:
@@ -175,10 +190,12 @@ class UsageSniffer:
         u = self.usage
         if not u:
             return " usage=?" if expected else ""
-        return (f" in={u.get('input_tokens', 0)}"
-                f" cache_write={u.get('cache_creation_input_tokens', 0)}"
-                f" cache_read={u.get('cache_read_input_tokens', 0)}"
-                f" out={u.get('output_tokens', 0)}")
+        return (
+            f" in={u.get('input_tokens', 0)}"
+            f" cache_write={u.get('cache_creation_input_tokens', 0)}"
+            f" cache_read={u.get('cache_read_input_tokens', 0)}"
+            f" out={u.get('output_tokens', 0)}"
+        )
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -206,8 +223,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def authorized(self):
-        if not secrets.compare_digest(self.headers.get("x-api-key", ""),
-                                      self.cfg.token):
+        if not secrets.compare_digest(self.headers.get("x-api-key", ""), self.cfg.token):
             self.refuse(401, "wrong or missing run token")
             return False
         if urlsplit(self.path).path not in self.cfg.allow_paths:
@@ -255,13 +271,15 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(body)
         except json.JSONDecodeError:
             payload = {}
-        digest = (f"body {seq:03d} {len(body) / 1024:.1f}KB "
-                  f"model={payload.get('model', '?')} "
-                  f"max_tokens={payload.get('max_tokens', '?')} "
-                  f"effort={payload.get('output_config', {}).get('effort', '-')} "
-                  f"msgs={len(payload.get('messages', []))} "
-                  f"tools={len(payload.get('tools', []))} "
-            f"stream={payload.get('stream', False)}")
+        digest = (
+            f"body {seq:03d} {len(body) / 1024:.1f}KB "
+            f"model={payload.get('model', '?')} "
+            f"max_tokens={payload.get('max_tokens', '?')} "
+            f"effort={payload.get('output_config', {}).get('effort', '-')} "
+            f"msgs={len(payload.get('messages', []))} "
+            f"tools={len(payload.get('tools', []))} "
+            f"stream={payload.get('stream', False)}"
+        )
 
         if cfg.log_dir:
             path = os.path.join(cfg.log_dir, f"{seq:03d}.json")
@@ -284,10 +302,9 @@ class Handler(BaseHTTPRequestHandler):
         if cfg.log_bodies and body:
             self.log_body(body)
 
-        headers = {k: v for k, v in self.headers.items()
-                   if k.lower() not in STRIP_REQ}
+        headers = {k: v for k, v in self.headers.items() if k.lower() not in STRIP_REQ}
         headers["Host"] = cfg.upstream
-        headers["x-api-key"] = cfg.api_key          # the only place the key appears
+        headers["x-api-key"] = cfg.api_key  # the only place the key appears
         # Narrow the offer only for clients that already accept gzip; anything
         # else is forwarded verbatim, so `identity` stays `identity`.
         accepted = self.headers.get("accept-encoding", "")
@@ -314,8 +331,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
 
-        sniffer = UsageSniffer(resp.getheader("Content-Type", ""),
-                               resp.getheader("Content-Encoding", ""))
+        sniffer = UsageSniffer(
+            resp.getheader("Content-Type", ""), resp.getheader("Content-Encoding", "")
+        )
         sent = 0
         try:
             while True:
@@ -338,23 +356,42 @@ class Handler(BaseHTTPRequestHandler):
 
         with cfg.lock:
             cfg.requests += 1
-        self.note(f"{self.client_address[0]} {self.command} {self.path} "
-                  f"-> {resp.status} {sent}B {time.monotonic() - started:.1f}s"
-                  f"{sniffer.digest(expected=urlsplit(self.path).path == '/v1/messages')}")
+        self.note(
+            f"{self.client_address[0]} {self.command} {self.path} "
+            f"-> {resp.status} {sent}B {time.monotonic() - started:.1f}s"
+            f"{sniffer.digest(expected=urlsplit(self.path).path == '/v1/messages')}"
+        )
 
     do_GET = do_POST = do_DELETE = do_PUT = relay
 
 
-def start_proxy(api_key, token, host, port=0, allow_paths=DEFAULT_ALLOW,
-          upstream=UPSTREAM, log_bodies=False, allow_models=None,
-          max_tokens_cap=None, log_dir=None):
+def start_proxy(
+    api_key,
+    token,
+    host,
+    port=0,
+    allow_paths=DEFAULT_ALLOW,
+    upstream=UPSTREAM,
+    log_bodies=False,
+    allow_models=None,
+    max_tokens_cap=None,
+    log_dir=None,
+):
     """Start the relay on a background thread. Returns (server, port).
 
     `host` is required: binding the right interface is the access control.
     """
     srv = ThreadingHTTPServer((host, port), Handler)
-    srv.cfg = Config(api_key, token, allow_paths, upstream, log_bodies,
-                     allow_models, max_tokens_cap, log_dir)
+    srv.cfg = Config(
+        api_key,
+        token,
+        allow_paths,
+        upstream,
+        log_bodies,
+        allow_models,
+        max_tokens_cap,
+        log_dir,
+    )
     srv.daemon_threads = True
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv, srv.server_address[1]
@@ -372,6 +409,7 @@ def run(cmd, **kw):
 
 
 # --- preflight ---------------------------------------------------------------
+
 
 def require_container_cli():
     if shutil.which("container") is None:
@@ -415,21 +453,24 @@ def firewall_warning():
 
     exe = os.path.realpath(sys.executable)
     version_root = os.path.dirname(os.path.dirname(exe))
-    names = {sys.executable, exe,
-             os.path.join(version_root, "Resources", "Python.app")}
+    names = {sys.executable, exe, os.path.join(version_root, "Resources", "Python.app")}
 
-    blocked = [path for path, is_blocked in _firewall_entries()
-               if is_blocked and path in names]
+    blocked = [
+        path for path, is_blocked in _firewall_entries() if is_blocked and path in names
+    ]
     if not blocked:
-        return          # unlisted signed interpreters are auto-allowed
+        return  # unlisted signed interpreters are auto-allowed
 
     target = blocked[0]
-    print(f"sanduk: WARNING the macOS firewall is on and\n"
-          f"  {target}\n"
-          f"  is set to block incoming connections.\n"
-          f"  The agent's calls to the proxy will hang until --timeout. Either\n"
-          f"  re-run with /usr/bin/python3, or allow this interpreter once:\n"
-          f"    sudo {FIREWALL} --unblockapp {target}", file=sys.stderr)
+    print(
+        f"sanduk: WARNING the macOS firewall is on and\n"
+        f"  {target}\n"
+        f"  is set to block incoming connections.\n"
+        f"  The agent's calls to the proxy will hang until --timeout. Either\n"
+        f"  re-run with /usr/bin/python3, or allow this interpreter once:\n"
+        f"    sudo {FIREWALL} --unblockapp {target}",
+        file=sys.stderr,
+    )
 
 
 def validate_key(key, base_url):
@@ -452,6 +493,7 @@ def validate_key(key, base_url):
 
 # --- network ---------------------------------------------------------------
 
+
 def network_info(name):
     """(gateway, subnet) for a container network, or None if it does not exist."""
     r = run(["container", "network", "inspect", name], capture_output=True)
@@ -470,8 +512,7 @@ def ensure_network(name):
     if info:
         return info
     print(f"sanduk: creating internal network {name}", file=sys.stderr)
-    r = run(["container", "network", "create", "--internal", name],
-            capture_output=True)
+    r = run(["container", "network", "create", "--internal", name], capture_output=True)
     if r.returncode != 0:
         die(f"could not create network {name}: {r.stderr.strip()}")
     info = network_info(name)
@@ -488,9 +529,26 @@ def hold_network_up(network, image):
     would have to fall back to 0.0.0.0, which puts it on Wi-Fi and LAN too.
     """
     name = f"sanduk-hold-{uuid.uuid4().hex[:6]}"
-    r = run(["container", "run", "-d", "--name", name, "--network", network,
-             "--cpus", "1", "--memory", "256M",
-             "--entrypoint", "sleep", image, "86400"], capture_output=True)
+    r = run(
+        [
+            "container",
+            "run",
+            "-d",
+            "--name",
+            name,
+            "--network",
+            network,
+            "--cpus",
+            "1",
+            "--memory",
+            "256M",
+            "--entrypoint",
+            "sleep",
+            image,
+            "86400",
+        ],
+        capture_output=True,
+    )
     if r.returncode != 0:
         die(f"could not start network holder: {r.stderr.strip()}")
     return name
@@ -511,6 +569,7 @@ def wait_for_gateway(gateway, timeout=30):
 
 
 # --- image -------------------------------------------------------------------
+
 
 def image_exists(image):
     out = run(["container", "image", "list"], capture_output=True)
@@ -553,15 +612,23 @@ def _build(image, cf):
 
 # --- run ---------------------------------------------------------------------
 
+
 def build_argv(args, name, workdir, task_text, network=None):
     argv = [
-        "container", "run",
-        "--name", name,
-        "--cpus", str(args.cpus),
-        "--memory", args.memory,
-        "-v", f"{workdir}:/work",
-        "-w", "/work",
-        "-e", KEY_ENV,                      # bare name: inherit, keep it out of argv
+        "container",
+        "run",
+        "--name",
+        name,
+        "--cpus",
+        str(args.cpus),
+        "--memory",
+        args.memory,
+        "-v",
+        f"{workdir}:/work",
+        "-w",
+        "/work",
+        "-e",
+        KEY_ENV,  # bare name: inherit, keep it out of argv
     ]
     # In proxy mode the inherited value is the run token, not the real key, and
     # ANTHROPIC_BASE_URL points back at the host. Both come from the child env
@@ -615,8 +682,7 @@ def launch(argv, timeout, quiet, env=None):
     The timer is what enforces --timeout: an agent that hangs without printing
     would never trip a deadline checked inside the read loop.
     """
-    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, text=True,
-                            bufsize=1, env=env)
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, text=True, bufsize=1, env=env)
     timed_out = threading.Event()
 
     def expire():
@@ -654,11 +720,15 @@ def launch(argv, timeout, quiet, env=None):
 
 # --- teardown ----------------------------------------------------------------
 
+
 def destroy(name, keep):
     if keep:
-        print(f"sanduk: keeping container {name} "
-              f"(`container inspect {name}` exposes the API key; "
-              f"`container delete {name}` when done)", file=sys.stderr)
+        print(
+            f"sanduk: keeping container {name} "
+            f"(`container inspect {name}` exposes the API key; "
+            f"`container delete {name}` when done)",
+            file=sys.stderr,
+        )
         return
     run(["container", "stop", name], capture_output=True)
     r = run(["container", "delete", name], capture_output=True)
@@ -669,6 +739,7 @@ def destroy(name, keep):
 
 
 # --- cli ---------------------------------------------------------------------
+
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
@@ -685,17 +756,29 @@ def parse_args(argv=None):
     )
     p.add_argument("task", nargs="?", help="the task prompt (or use --task-file)")
     p.add_argument("--task-file", type=Path, help="read the task prompt from a file")
-    p.add_argument("-w", "--workdir", type=Path, default=Path("./work"),
-                   help="host directory bind-mounted at /work (default: ./work)")
-    p.add_argument("-o", "--report", type=Path,
-                   help="copy the agent's REPORT.md here after the run")
+    p.add_argument(
+        "-w",
+        "--workdir",
+        type=Path,
+        default=Path("./work"),
+        help="host directory bind-mounted at /work (default: ./work)",
+    )
+    p.add_argument(
+        "-o", "--report", type=Path, help="copy the agent's REPORT.md here after the run"
+    )
 
     g = p.add_argument_group("image")
-    g.add_argument("-i", "--image", default=DEFAULT_IMAGE,
-                   help=f"image to run (default: {DEFAULT_IMAGE})")
-    g.add_argument("--containerfile",
-                   help="Containerfile used when the image must be built "
-                        "(default: the copy embedded in this script)")
+    g.add_argument(
+        "-i",
+        "--image",
+        default=DEFAULT_IMAGE,
+        help=f"image to run (default: {DEFAULT_IMAGE})",
+    )
+    g.add_argument(
+        "--containerfile",
+        help="Containerfile used when the image must be built "
+        "(default: the copy embedded in this script)",
+    )
     g.add_argument("--rebuild", action="store_true", help="rebuild the image first")
 
     g = p.add_argument_group("agent")
@@ -703,58 +786,103 @@ def parse_args(argv=None):
     g.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
     g.add_argument("--max-turns", type=int)
     g.add_argument("--allowed-tools", help='e.g. "Read Edit Bash(git *)"')
-    g.add_argument("--permission-mode",
-                   choices=["acceptEdits", "auto", "bypassPermissions", "manual",
-                            "dontAsk", "plan"],
-                   help="default: --dangerously-skip-permissions (nobody is "
-                        "there to answer a prompt)")
-    g.add_argument("--bare", action="store_true",
-                   help="claude --bare: no hooks, LSP, plugins, CLAUDE.md "
-                        "discovery; auth strictly from ANTHROPIC_API_KEY")
-    g.add_argument("--no-report-instruction", action="store_true",
-                   help="do not append the write-a-REPORT.md instruction")
+    g.add_argument(
+        "--permission-mode",
+        choices=["acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"],
+        help="default: --dangerously-skip-permissions (nobody is "
+        "there to answer a prompt)",
+    )
+    g.add_argument(
+        "--bare",
+        action="store_true",
+        help="claude --bare: no hooks, LSP, plugins, CLAUDE.md "
+        "discovery; auth strictly from ANTHROPIC_API_KEY",
+    )
+    g.add_argument(
+        "--no-report-instruction",
+        action="store_true",
+        help="do not append the write-a-REPORT.md instruction",
+    )
 
     g = p.add_argument_group("vm")
     g.add_argument("--cpus", type=int, default=4)
     g.add_argument("--memory", default="4G")
     g.add_argument("--timeout", type=int, default=900, help="seconds (default: 900)")
-    g.add_argument("-e", "--env", action="append", default=[], metavar="K=V",
-                   help="extra environment variable (repeatable)")
-    g.add_argument("--base-url",
-                   help="set ANTHROPIC_BASE_URL inside the container directly")
+    g.add_argument(
+        "-e",
+        "--env",
+        action="append",
+        default=[],
+        metavar="K=V",
+        help="extra environment variable (repeatable)",
+    )
+    g.add_argument(
+        "--base-url", help="set ANTHROPIC_BASE_URL inside the container directly"
+    )
     g.add_argument("--network", help="attach to this container network")
 
     g = p.add_argument_group("proxy (key never enters the container)")
-    g.add_argument("--proxy", action="store_true",
-                   help="run the agent on an egress-blocked network and relay "
-                        "its API calls through a host-side proxy that holds the "
-                        "key. The container gets a per-run token instead.")
-    g.add_argument("--proxy-network", default="sanduk-net",
-                   help="internal network to create/use (default: sanduk-net)")
-    g.add_argument("--proxy-port", type=int, default=0,
-                   help="host port for the proxy (default: an ephemeral one)")
-    g.add_argument("--proxy-allow-path", action="append",
-                   help="allowed upstream path, matched exactly (repeatable)")
-    g.add_argument("--allow-model", action="append",
-                   help="restrict the agent to these model ids (repeatable); "
-                        "enforced on the host, where the container cannot edit it")
-    g.add_argument("--max-tokens-cap", type=int,
-                   help="clamp max_tokens on every request the agent sends")
-    g.add_argument("--log-bodies", action="store_true",
-                   help="record every request body the agent sends upstream: a "
-                        "digest line per call, full JSON under --log-dir")
-    g.add_argument("--log-dir", type=Path, default=Path("./sanduk-logs"),
-                   help="where --log-bodies writes full request JSON (default: "
-                        "./sanduk-logs). Deliberately outside the bind mount, "
-                        "so the agent cannot read or edit its own audit trail.")
+    g.add_argument(
+        "--proxy",
+        action="store_true",
+        help="run the agent on an egress-blocked network and relay "
+        "its API calls through a host-side proxy that holds the "
+        "key. The container gets a per-run token instead.",
+    )
+    g.add_argument(
+        "--proxy-network",
+        default="sanduk-net",
+        help="internal network to create/use (default: sanduk-net)",
+    )
+    g.add_argument(
+        "--proxy-port",
+        type=int,
+        default=0,
+        help="host port for the proxy (default: an ephemeral one)",
+    )
+    g.add_argument(
+        "--proxy-allow-path",
+        action="append",
+        help="allowed upstream path, matched exactly (repeatable)",
+    )
+    g.add_argument(
+        "--allow-model",
+        action="append",
+        help="restrict the agent to these model ids (repeatable); "
+        "enforced on the host, where the container cannot edit it",
+    )
+    g.add_argument(
+        "--max-tokens-cap",
+        type=int,
+        help="clamp max_tokens on every request the agent sends",
+    )
+    g.add_argument(
+        "--log-bodies",
+        action="store_true",
+        help="record every request body the agent sends upstream: a "
+        "digest line per call, full JSON under --log-dir",
+    )
+    g.add_argument(
+        "--log-dir",
+        type=Path,
+        default=Path("./sanduk-logs"),
+        help="where --log-bodies writes full request JSON (default: "
+        "./sanduk-logs). Deliberately outside the bind mount, "
+        "so the agent cannot read or edit its own audit trail.",
+    )
 
     g = p.add_argument_group("lifecycle")
-    g.add_argument("--keep", action="store_true",
-                   help="do not delete the container when the run ends")
-    g.add_argument("-q", "--quiet", action="store_true",
-                   help="suppress the per-event trace")
-    g.add_argument("--dry-run", action="store_true",
-                   help="print the container command and exit")
+    g.add_argument(
+        "--keep",
+        action="store_true",
+        help="do not delete the container when the run ends",
+    )
+    g.add_argument(
+        "-q", "--quiet", action="store_true", help="suppress the per-event trace"
+    )
+    g.add_argument(
+        "--dry-run", action="store_true", help="print the container command and exit"
+    )
     g.add_argument("--skip-key-check", action="store_true")
     return p.parse_args(argv)
 
@@ -782,8 +910,12 @@ def main(argv=None):
 
     if not args.dry_run and not args.skip_key_check:
         # Before anything is started, so a bad key cannot leak a container.
-        validate_key(key, "https://api.anthropic.com" if args.proxy
-                     else (args.base_url or "https://api.anthropic.com"))
+        validate_key(
+            key,
+            "https://api.anthropic.com"
+            if args.proxy
+            else (args.base_url or "https://api.anthropic.com"),
+        )
 
     name = f"sanduk-{uuid.uuid4().hex[:8]}"
     network, proxy_srv, port, holder = args.network, None, 0, None
@@ -809,11 +941,16 @@ def main(argv=None):
                 log_dir.mkdir(parents=True, exist_ok=True)
                 print(f"sanduk: request bodies -> {log_dir}", file=sys.stderr)
             proxy_srv, port = start_proxy(
-                key, token, gateway, args.proxy_port,
+                key,
+                token,
+                gateway,
+                args.proxy_port,
                 allow_paths=args.proxy_allow_path or DEFAULT_ALLOW,
-                log_bodies=args.log_bodies, allow_models=args.allow_model,
-                max_tokens_cap=args.max_tokens_cap, log_dir=str(log_dir)
-                if log_dir else None)
+                log_bodies=args.log_bodies,
+                allow_models=args.allow_model,
+                max_tokens_cap=args.max_tokens_cap,
+                log_dir=str(log_dir) if log_dir else None,
+            )
         # The container inherits the token under the name ANTHROPIC_API_KEY.
         # The real key stays in this process and in the proxy thread only.
         child_env[KEY_ENV] = token
@@ -827,8 +964,10 @@ def main(argv=None):
         print(shlex.join(cmd))
         if args.proxy:
             print(f"# proxy: {gateway} -> https://api.anthropic.com")
-            print(f"# container env: {KEY_ENV}=<run token> "
-                  f"ANTHROPIC_BASE_URL={child_env['ANTHROPIC_BASE_URL']}")
+            print(
+                f"# container env: {KEY_ENV}=<run token> "
+                f"ANTHROPIC_BASE_URL={child_env['ANTHROPIC_BASE_URL']}"
+            )
         return 0
 
     require_container_cli()
@@ -836,8 +975,11 @@ def main(argv=None):
         build_image(args.image, args.containerfile)
 
     if args.proxy:
-        print(f"sanduk: proxy bound to {gateway}:{port} (bridge only); "
-              f"{network} has no route off the host", file=sys.stderr)
+        print(
+            f"sanduk: proxy bound to {gateway}:{port} (bridge only); "
+            f"{network} has no route off the host",
+            file=sys.stderr,
+        )
     print(f"sanduk: {name} -> {workdir}", file=sys.stderr)
     started = time.monotonic()
     try:
@@ -853,8 +995,10 @@ def main(argv=None):
         if proxy_srv:
             proxy_srv.shutdown()
             c = proxy_srv.cfg
-            print(f"sanduk: proxy relayed {c.requests}, rejected {c.rejected}",
-                  file=sys.stderr)
+            print(
+                f"sanduk: proxy relayed {c.requests}, rejected {c.rejected}",
+                file=sys.stderr,
+            )
         if holder:
             destroy(holder, keep=False)
     destroy(name, args.keep)
@@ -864,15 +1008,21 @@ def main(argv=None):
     if result:
         u = result.get("usage", {})
         cached = u.get("cache_read_input_tokens", 0)
-        total_in = (u.get("input_tokens", 0)
-                    + u.get("cache_creation_input_tokens", 0) + cached)
-        print(f"sanduk: {result.get('num_turns', '?')} turns, "
-              f"{total_in:,} in ({cached:,} cached) / "
-              f"{u.get('output_tokens', 0):,} out, "
-              f"${result.get('total_cost_usd', 0):.4f}", file=sys.stderr)
+        total_in = (
+            u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0) + cached
+        )
+        print(
+            f"sanduk: {result.get('num_turns', '?')} turns, "
+            f"{total_in:,} in ({cached:,} cached) / "
+            f"{u.get('output_tokens', 0):,} out, "
+            f"${result.get('total_cost_usd', 0):.4f}",
+            file=sys.stderr,
+        )
         if result.get("is_error"):
-            print(f"sanduk: agent reported an error: {result.get('result')}",
-                  file=sys.stderr)
+            print(
+                f"sanduk: agent reported an error: {result.get('result')}",
+                file=sys.stderr,
+            )
             return 1
 
     if report.is_file():

@@ -157,6 +157,10 @@ OPENAI_COMPAT_PROVIDER = Provider(
     host="127.0.0.1:8080",
     routes={
         "/v1/chat/completions": OPENAI_CHAT,
+        # Measured against llama-server build 10850: it answers /v1/responses
+        # too. Declared because the route table is the egress allowlist, so a
+        # Responses-only agent cannot reach a local model without it.
+        "/v1/responses": OPENAI_RESPONSES,
         "/v1/models": None,
     },
     key_env="OPENAI_API_KEY",

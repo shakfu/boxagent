@@ -1,0 +1,18 @@
+# codex ships as an npm package, so this keeps the node base. Pinned: an
+# unpinned agent changes what runs in the container without a commit here.
+FROM docker.io/library/node:22-slim
+
+ARG CODEX_VERSION=0.153.4
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git ripgrep ca-certificates curl jq python3 \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g @openai/codex@${CODEX_VERSION} && npm cache clean --force
+
+RUN mkdir -p /work && chown node:node /work
+USER node
+ENV HOME=/home/node \
+    CODEX_DISABLE_UPDATE_CHECK=1
+WORKDIR /work
+ENTRYPOINT ["codex"]

@@ -100,7 +100,9 @@ class Hax(Agent):
                     f"{flag} is a Claude Code flag; hax has no equivalent"
                 )
 
-    def argv(self, args: argparse.Namespace, provider: Provider, task: str) -> list[str]:
+    def argv(
+        self, args: argparse.Namespace, provider: Provider, task: str, wiring: Wiring
+    ) -> list[str]:
         argv = ["--json", f"--provider={family(provider)}-compatible"]
         if args.model:
             argv.append(f"--model={args.model}")

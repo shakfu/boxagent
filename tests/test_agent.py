@@ -5,15 +5,21 @@ are the only stateful part of a handler.
 """
 
 import argparse
+import json
 from types import SimpleNamespace
 
 import pytest
 
 from sanduk.agent import Agent, Outcome, Reader, Wiring, agent_names, get_agent, registry
+from sanduk.agents import BUILTIN
 from sanduk.agents.claude import ClaudeCode
+from sanduk.agents.codex import Codex
 from sanduk.agents.hax import Hax
+from sanduk.agents.opencode import OpenCode
 from sanduk.errors import AgentboxError
 from sanduk.providers import get_provider
+
+RELAY = "http://10.0.0.1:9"
 
 
 def flags(**kw) -> argparse.Namespace:
@@ -38,11 +44,11 @@ def flags(**kw) -> argparse.Namespace:
 def test_the_shipped_handlers_are_found_without_install_metadata():
     """A source checkout has no entry points; losing claude there would be the
     worst possible failure mode, so the built-ins are seeded directly."""
-    assert set(agent_names()) >= {"claude", "hax"}
+    assert set(agent_names()) >= {"claude", "codex", "hax", "opencode"}
     assert registry()["claude"] is ClaudeCode
 
 
-@pytest.mark.parametrize("agent", [ClaudeCode, Hax])
+@pytest.mark.parametrize("agent", BUILTIN)
 def test_every_shipped_handler_names_an_image_and_a_containerfile(agent):
     """The Containerfile is package data reached through __file__; a rename that
     misses one handler is only visible on a build otherwise."""
@@ -62,7 +68,7 @@ class Fake(Agent):
     image = "fake:latest"
     protocols = frozenset({"anthropic-messages"})
 
-    def argv(self, args, provider, task):
+    def argv(self, args, provider, task, wiring):
         return [task]
 
     def wire(self, args, provider, root):
@@ -210,26 +216,29 @@ def test_agent_key_env_overrides_the_handler():
 # --- argv -------------------------------------------------------------------
 
 
+def argv_of(agent, args, provider, task="go"):
+    """An agent's argv, with this run's wiring resolved the way cli.py does."""
+    return agent.argv(args, provider, task, agent.wire(args, provider, RELAY))
+
+
 def test_hax_selects_the_compatible_provider_matching_the_protocol():
     args = flags(agent="hax", model="qwen3", max_turns=3)
-    assert Hax().argv(args, get_provider("anthropic"), "go")[:2] == [
+    assert argv_of(Hax(), args, get_provider("anthropic"))[:2] == [
         "--json",
         "--provider=anthropic-compatible",
     ]
-    assert "--provider=openai-compatible" in Hax().argv(
-        args, get_provider("openai"), "go"
-    )
+    assert "--provider=openai-compatible" in argv_of(Hax(), args, get_provider("openai"))
 
 
 def test_hax_takes_the_turn_cap_from_the_environment():
     """hax has no --max-turns flag; the setting has a HAX_ variable instead."""
     args = flags(agent="hax", max_turns=3)
-    assert "3" not in " ".join(Hax().argv(args, get_provider("openai"), "go"))
+    assert "3" not in " ".join(argv_of(Hax(), args, get_provider("openai")))
     assert Hax().wire(args, get_provider("openai"), None).env["HAX_MAX_TURNS"] == "3"
 
 
 def test_the_task_is_the_last_hax_argument():
-    argv = Hax().argv(flags(agent="hax"), get_provider("openai"), "do the thing")
+    argv = argv_of(Hax(), flags(agent="hax"), get_provider("openai"), "do the thing")
     assert argv[-1] == "do the thing"
 
 
@@ -334,3 +343,184 @@ def test_quiet_suppresses_the_trace_but_not_the_tally(capsys):
     reader.event({"kind": "turn_usage", "usage": {"input": 7}}, quiet=True)
     assert capsys.readouterr().out == ""
     assert reader.tokens["input"] == 7
+
+
+# --- codex ------------------------------------------------------------------
+
+
+def test_codex_speaks_responses_and_nothing_else():
+    """wire_api accepts only "responses". openai serves that route, and so does
+    a current llama-server through openai-compat; the other two do not."""
+    for name in ("openai", "openai-compat"):
+        Codex().check(flags(agent="codex"), get_provider(name))
+    for name in ("anthropic", "openrouter"):
+        with pytest.raises(AgentboxError, match="cannot talk"):
+            Codex().check(flags(agent="codex"), get_provider(name))
+
+
+def test_codex_takes_its_endpoint_on_the_command_line():
+    """There is no base-URL variable; the endpoint is a config key. This is why
+    argv is handed the wiring."""
+    argv = argv_of(Codex(), flags(agent="codex"), get_provider("openai"))
+    assert 'model_providers.sanduk.base_url="http://10.0.0.1:9/v1"' in argv
+    assert 'model_provider="sanduk"' in argv
+    assert 'model_providers.sanduk.wire_api="responses"' in argv
+
+
+def test_codex_names_the_key_variable_rather_than_the_key():
+    """env_key is a variable name. The credential reaches the container under
+    it, and never through this argv, which inspect can read."""
+    agent, args = Codex(), flags(agent="codex")
+    wiring = agent.wire(args, get_provider("openai"), RELAY)
+    argv = agent.argv(args, get_provider("openai"), "go", wiring)
+    assert f'model_providers.sanduk.env_key="{wiring.key_env}"' in argv
+    assert wiring.key_env == "CODEX_RELAY_KEY"
+
+
+def test_codex_disables_its_own_sandbox():
+    """The container is the boundary; a sandbox inside it would only stop the
+    agent doing the work it was given."""
+    argv = argv_of(Codex(), flags(agent="codex"), get_provider("openai"))
+    assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
+
+
+def test_codex_counts_cached_input_inside_input():
+    outcome = drain(
+        Codex().reader(),
+        [
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "done"}},
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 2252,
+                    "cached_input_tokens": 2192,
+                    "output_tokens": 40,
+                },
+            },
+        ],
+    )
+    assert outcome == Outcome(
+        ok=True, text="done", stats="2,252 in (2,192 cached) / 40 out"
+    )
+
+
+def test_a_codex_command_traces_once(capsys):
+    """codex reports one command as item.started and item.completed. Tracing
+    both printed every command twice."""
+    reader = Codex().reader()
+    item = {"type": "command_execution", "command": "head -n 1 a.py"}
+    for kind in ("item.started", "item.completed"):
+        reader.event({"type": kind, "item": item}, quiet=False)
+    assert capsys.readouterr().out.count("head -n 1 a.py") == 1
+
+
+def test_an_item_level_codex_error_is_traced_and_not_fatal(capsys):
+    """A missing model entry arrives as an error item, not turn.failed."""
+    reader = Codex().reader()
+    reader.event(
+        {"type": "item.completed", "item": {"type": "error", "message": "no metadata"}},
+        quiet=False,
+    )
+    reader.event({"type": "turn.completed", "usage": {}}, quiet=False)
+    assert "! no metadata" in capsys.readouterr().out
+    outcome = reader.finish()
+    assert outcome is not None and outcome.ok
+
+
+def test_a_failed_codex_turn_is_not_ok():
+    outcome = drain(Codex().reader(), [{"type": "turn.failed", "error": "no credit"}])
+    assert outcome is not None and not outcome.ok and outcome.error == "no credit"
+
+
+# --- opencode ---------------------------------------------------------------
+
+
+def test_opencode_reaches_every_provider():
+    for name in ("anthropic", "openai", "openrouter", "openai-compat"):
+        OpenCode().check(flags(agent="opencode", model="m"), get_provider(name))
+
+
+def test_opencode_needs_a_model():
+    """The config names one model and --model selects it; without a name there
+    is nothing to put in either."""
+    with pytest.raises(AgentboxError, match="--model is required"):
+        OpenCode().check(flags(agent="opencode"), get_provider("openai"))
+
+
+def test_opencode_config_travels_in_the_environment(monkeypatch):
+    """Not a file: opencode.json in the workdir would sit in the user's
+    repository and be editable by the agent that reads it."""
+    wiring = OpenCode().wire(
+        flags(agent="opencode", model="m"), get_provider("openai"), RELAY
+    )
+    config = json.loads(wiring.env["OPENCODE_CONFIG_CONTENT"])
+    provider = config["provider"]["sanduk"]
+    assert provider["options"]["baseURL"] == "http://10.0.0.1:9/v1"
+    assert provider["models"] == {"m": {"name": "m"}}
+
+
+def test_the_opencode_config_carries_no_credential():
+    wiring = OpenCode().wire(
+        flags(agent="opencode", model="m"), get_provider("openai"), RELAY
+    )
+    blob = wiring.env["OPENCODE_CONFIG_CONTENT"]
+    assert f"{{env:{wiring.key_env}}}" in blob
+    assert wiring.key_env == "OPENCODE_RELAY_KEY"
+
+
+@pytest.mark.parametrize(
+    ("provider", "npm"),
+    [
+        ("anthropic", "@ai-sdk/anthropic"),
+        ("openai", "@ai-sdk/openai-compatible"),
+        ("openrouter", "@ai-sdk/openai-compatible"),
+        ("openai-compat", "@ai-sdk/openai-compatible"),
+    ],
+)
+def test_the_driver_follows_the_wire_protocol(provider, npm):
+    wiring = OpenCode().wire(
+        flags(agent="opencode", model="m"), get_provider(provider), RELAY
+    )
+    config = json.loads(wiring.env["OPENCODE_CONFIG_CONTENT"])
+    assert config["provider"]["sanduk"]["npm"] == npm
+
+
+def test_opencode_selects_the_model_through_its_own_provider_id():
+    argv = argv_of(
+        OpenCode(), flags(agent="opencode", model="qwen3"), get_provider("openai")
+    )
+    assert argv[argv.index("--model") + 1] == "sanduk/qwen3"
+    assert "--auto" in argv
+
+
+def test_opencode_sums_the_per_step_token_counts():
+    """Counts arrive per step, and part.tokens.input excludes the cache: one
+    real step reported input 50 beside cache.read 7185."""
+    outcome = drain(
+        OpenCode().reader(),
+        [
+            {"type": "tool_use", "part": {"type": "tool", "tool": "write"}},
+            {
+                "type": "step_finish",
+                "part": {
+                    "tokens": {"input": 50, "output": 394, "cache": {"read": 7185}},
+                    "cost": 0.0,
+                },
+            },
+            {"type": "text", "part": {"type": "text", "text": "Done."}},
+            {
+                "type": "step_finish",
+                "part": {
+                    "tokens": {"input": 416, "output": 130, "cache": {"read": 7235}},
+                    "cost": 0.0,
+                },
+            },
+        ],
+    )
+    assert outcome == Outcome(
+        ok=True, text="Done.", stats="14,886 in (14,420 cached) / 524 out, $0.0000"
+    )
+
+
+def test_no_step_means_no_outcome():
+    assert drain(OpenCode().reader(), [{"type": "step_start", "part": {}}]) is None
