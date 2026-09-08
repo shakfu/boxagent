@@ -2,19 +2,21 @@
 
 'sanduk', pronounced SAN-dook, means 'box' in Arabic.
 
-Run an agent inside a disposable container. The agent does its work, writes a report to a bind-mounted directory, and the container is deleted.
+sanduk is a Python CLI tool and package that makes it easy to run an agent inside a disposable container. The agent does its work, writes a report to a bind-mounted directory, and when it’s finished, the container is deleted.
 
-Today that means Claude Code on macOS through Apple's [`container`](https://github.com/apple/container). The container engine sits behind `sanduk.runtime.Runtime` and the agent CLI behind `sanduk.agent`, so Docker, Podman, and other agents are additive.
+Two agents ship: Claude Code and [hax](https://github.com/OleksandrChekhovskyi/hax). Two container engines: Apple's [`container`](https://github.com/apple/container) on macOS, and `docker`. Each sits behind a registry -- an agent behind `sanduk.agent.Agent`, an engine behind `sanduk.runtime.Runtime` -- so a third of either is one class. An agent can live in your own package and be found by entry point; see [docs/agents.md](docs/agents.md). Podman is not implemented.
 
 Four providers are supported: Anthropic, OpenAI, OpenRouter, and any OpenAI-compatible server, which includes a local `llama-server`. See [Providers](#providers).
 
-In its stronger mode the VM has no route off the host and never holds the API key: a host-side relay injects the credential, and the container gets a per-run token that is worthless anywhere else. Against a local model there is no key to hold, and nothing leaves the machine at all.
+In its stronger mode the container has no route off the host and never holds the API key: a host-side relay injects the credential, and the container gets a per-run token that is worthless anywhere else. Against a local model there is no key to hold, and nothing leaves the machine at all.
 
 ## Requirements
 
-- Mac with Apple silicon, macOS 26 or later (`container` requires both)
+- A container engine, one of:
 
-- [`container`](https://github.com/apple/container) 1.2.0 or later
+  - Apple's [`container`](https://github.com/apple/container) 1.2.0 or later, which needs Apple silicon and macOS 26 or later
+
+  - `docker`, with a daemon on this kernel. `--proxy` needs the bridge gateway to be an address this host can bind, which Docker Desktop, Colima and Lima do not give.
 
 - Python 3.11 or later, and `uv`
 
@@ -22,7 +24,7 @@ In its stronger mode the VM has no route off the host and never holds the API ke
 
 Apple's `container` runs **Linux** containers as lightweight VMs. There is no such thing as a macOS container here; anything needing Xcode or the macOS toolchain cannot be the workload.
 
-The image is `node:22-slim` plus `git`, `ripgrep`, `curl`, `jq`, and `python3`. The agent can only run what is in it. Without an interpreter it falls back to hand-tracing and still writes a confident report, so check whether the findings say they were reproduced. There is no C, Go, or Rust toolchain: point `--image` at your own, or `--containerfile` at one to build.
+Each agent has its own image. Claude Code's is `node:22-slim`; hax's is `debian:trixie-slim` with no language runtime, since the binary is static. Both add `git`, `ripgrep`, `curl`, `jq`, and `python3`. The agent can only run what is in it. Without an interpreter it falls back to hand-tracing and still writes a confident report, so check whether the findings say they were reproduced. There is no C, Go, or Rust toolchain: point `--image` at your own, or `--containerfile` at one to build.
 
 ## Quickstart
 
@@ -44,8 +46,8 @@ uv run sanduk --help
 
 |                                   | default          | `--proxy`                        | `--proxy` + local model |
 | --------------------------------- | ---------------- | -------------------------------- | ----------------------- |
-| Host filesystem                    | VM isolation     | VM isolation                     | VM isolation            |
-| API key location                   | inside the VM    | host only; VM holds a run token  | there is no key         |
+| Host filesystem                    | container only   | container only                   | container only          |
+| API key location                   | in the container | host only; the container holds a run token | there is no key |
 | Egress                             | unrestricted     | none                             | none                    |
 | Agent can POST your source anywhere| yes              | no                               | no                      |
 | Which endpoints the agent may call | all              | the provider's, matched exactly   | the provider's, matched exactly |
