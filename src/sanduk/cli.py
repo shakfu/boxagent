@@ -3,8 +3,9 @@
 Lifecycle: validate key -> build image if absent -> run one container -> read
 the agent's report off a bind mount -> delete the container.
 
-The API key is read from ANTHROPIC_API_KEY and passed with the bare-name `-e`
-form, which tells the engine to inherit the value from this process. It is
+The API key is read from the provider's environment variable (ANTHROPIC_API_KEY
+by default) and passed with the bare-name `-e` form, which tells the engine to
+inherit the value from this process. It is
 never a command-line argument, so it does not appear in the host's process
 list. Without --proxy it is still visible inside the container and in `inspect`
 output while the container exists.
@@ -20,19 +21,20 @@ import shutil
 import sys
 import time
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
-from sanduk.agent import (
-    BASE_URL_ENV,
-    KEY_ENV,
-    REPORT_INSTRUCTION,
-    REPORT_NAME,
-    claude_argv,
-    launch,
-)
+from sanduk.agent import REPORT_INSTRUCTION, REPORT_NAME, claude_argv, launch
 from sanduk.errors import AgentboxError
 from sanduk.preflight import firewall_warning, validate_key
-from sanduk.proxy import DEFAULT_ALLOW, ProxyServer, start_proxy
+from sanduk.providers import (
+    DEFAULT_PROVIDER,
+    PROVIDERS,
+    Provider,
+    get_provider,
+    parse_upstream,
+)
+from sanduk.proxy import ProxyServer, start_proxy
 from sanduk.runtime import (
     DEFAULT_CONTAINERFILE,
     DEFAULT_IMAGE,
@@ -44,8 +46,6 @@ from sanduk.runtime import (
 )
 from sanduk.util import note
 
-API_URL = "https://api.anthropic.com"
-
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -53,11 +53,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Run an agent in a disposable container.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "The API key comes from the ANTHROPIC_API_KEY environment variable only.\n"
+            "The API key comes from the provider's environment variable only.\n"
             "\n"
             "  export ANTHROPIC_API_KEY=sk-ant-...\n"
             "  sanduk 'Summarise every .py file in this directory.' -w ./work\n"
             "  sanduk --task-file brief.md -w ./repo --keep\n"
+            "  sanduk 'Review this.' --provider openai-compat \\\n"
+            "      --upstream http://127.0.0.1:8080 --proxy\n"
         ),
     )
     p.add_argument("task", nargs="?", help="the task prompt (or use --task-file)")
@@ -135,6 +137,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     g.add_argument("--network", help="attach to this container network")
 
+    g = p.add_argument_group("provider")
+    g.add_argument(
+        "--provider",
+        choices=sorted(PROVIDERS),
+        default=DEFAULT_PROVIDER,
+        help=f"upstream API and its wire protocol (default: {DEFAULT_PROVIDER})",
+    )
+    g.add_argument(
+        "--upstream",
+        help="where the relay forwards, as scheme://host:port with no path "
+        "(e.g. http://127.0.0.1:8080 for a local llama-server). Defaults to "
+        "the provider's own endpoint.",
+    )
+    g.add_argument(
+        "--insecure-upstream",
+        action="store_true",
+        help="permit a plaintext http upstream that is not loopback. The API "
+        "key is then sent in clear.",
+    )
+    g.add_argument(
+        "--agent-key-env",
+        help="environment variable the agent reads its credential from inside "
+        "the container (default: the provider's)",
+    )
+    g.add_argument(
+        "--agent-base-url-env",
+        help="environment variable the agent reads its base URL from inside "
+        "the container (default: the provider's)",
+    )
+
     g = p.add_argument_group("proxy (key never enters the container)")
     g.add_argument(
         "--proxy",
@@ -201,20 +233,45 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+def resolve_provider(args: argparse.Namespace) -> Provider:
+    """The provider record, with --upstream applied if given."""
+    provider = get_provider(args.provider)
+    if args.upstream:
+        scheme, host = parse_upstream(args.upstream, args.insecure_upstream)
+        provider = replace(provider, scheme=scheme, host=host)
+    return provider
+
+
+def container_env_names(args: argparse.Namespace, provider: Provider) -> tuple[str, str]:
+    """(key var, base-url var) the agent reads inside the container.
+
+    Separate from the provider's own env names, which is where sanduk reads the
+    real key on the host. They coincide for Claude Code against Anthropic and
+    diverge for anything else, so an agent is pointed at the relay with flags
+    rather than with a new module.
+    """
+    return (
+        args.agent_key_env or provider.key_env,
+        args.agent_base_url_env or provider.base_url_env,
+    )
+
+
 def build_spec(
     args: argparse.Namespace,
     name: str,
     workdir: Path,
     task: str,
     network: str | None = None,
+    provider: Provider | None = None,
 ) -> ContainerSpec:
     """Map parsed flags onto one engine-neutral container description."""
-    inherit = [KEY_ENV]
+    key_env, base_url_env = container_env_names(args, provider or get_provider())
+    inherit = [key_env]
     # In proxy mode the inherited value is the run token, not the real key, and
     # ANTHROPIC_BASE_URL points back at the host. Both come from the child env
     # (see child_env in run), so neither appears in this argv or in `ps`.
     if args.proxy or args.base_url:
-        inherit.append(BASE_URL_ENV)
+        inherit.append(base_url_env)
     return ContainerSpec(
         name=name,
         image=args.image,
@@ -258,11 +315,14 @@ def report_usage(result: dict[str, object]) -> None:
 
 def run(args: argparse.Namespace) -> int:
     runtime = get_runtime(args.runtime)
+    provider = resolve_provider(args)
+    agent_key_env, agent_base_url_env = container_env_names(args, provider)
+    api_url = f"{provider.scheme}://{provider.host}"
     task = read_task(args)
 
-    key = os.environ.get(KEY_ENV, "").strip()
-    if not key:
-        raise AgentboxError(f"{KEY_ENV} is not set. export it, then re-run.")
+    key = os.environ.get(provider.key_env, "").strip()
+    if not key and provider.has_auth:
+        raise AgentboxError(f"{provider.key_env} is not set. export it, then re-run.")
 
     workdir = args.workdir.resolve()
     workdir.mkdir(parents=True, exist_ok=True)
@@ -272,7 +332,7 @@ def run(args: argparse.Namespace) -> int:
 
     if not args.dry_run and not args.skip_key_check:
         # Before anything is started, so a bad key cannot leak a container.
-        validate_key(key, API_URL if args.proxy else (args.base_url or API_URL))
+        validate_key(key, api_url if args.proxy else (args.base_url or api_url), provider)
 
     name = f"sanduk-{uuid.uuid4().hex[:8]}"
     network: str | None = args.network
@@ -295,23 +355,25 @@ def run(args: argparse.Namespace) -> int:
                 if holder:
                     runtime.destroy(holder)
                 raise AgentboxError(f"{gateway} never became bindable on this host")
-            proxy_srv, port = _start_relay(args, key, token, gateway, name)
-        # The container inherits the token under the name ANTHROPIC_API_KEY.
-        # The real key stays in this process and in the proxy thread only.
-        child_env[KEY_ENV] = token
-        child_env[BASE_URL_ENV] = f"http://{gateway}:{port}"
+            proxy_srv, port = _start_relay(args, key, token, gateway, name, provider)
+        # The container inherits the token under the agent's key variable. The
+        # real key stays in this process and in the proxy thread only.
+        child_env[agent_key_env] = token
+        child_env[agent_base_url_env] = f"http://{gateway}:{port}"
     elif args.base_url:
-        child_env[BASE_URL_ENV] = args.base_url
+        child_env[agent_base_url_env] = args.base_url
 
-    cmd = runtime.run_argv(build_spec(args, name, workdir, task, network=network))
+    cmd = runtime.run_argv(
+        build_spec(args, name, workdir, task, network=network, provider=provider)
+    )
 
     if args.dry_run:
         print(shlex.join(cmd))
         if args.proxy:
-            print(f"# proxy: {gateway} -> {API_URL}")
+            print(f"# proxy: {gateway} -> {api_url} ({provider.name})")
             print(
-                f"# container env: {KEY_ENV}=<run token> "
-                f"{BASE_URL_ENV}={child_env[BASE_URL_ENV]}"
+                f"# container env: {agent_key_env}=<run token> "
+                f"{agent_base_url_env}={child_env[agent_base_url_env]}"
             )
         return 0
 
@@ -355,7 +417,12 @@ def run(args: argparse.Namespace) -> int:
 
 
 def _start_relay(
-    args: argparse.Namespace, key: str, token: str, gateway: str, name: str
+    args: argparse.Namespace,
+    key: str,
+    token: str,
+    gateway: str,
+    name: str,
+    provider: Provider,
 ) -> tuple[ProxyServer, int]:
     """Bind the relay to the bridge address only: unreachable from Wi-Fi or LAN."""
     log_dir = None
@@ -368,11 +435,12 @@ def _start_relay(
         token,
         gateway,
         args.proxy_port,
-        allow_paths=args.proxy_allow_path or DEFAULT_ALLOW,
+        allow_paths=args.proxy_allow_path or None,
         log_bodies=args.log_bodies,
         allow_models=args.allow_model,
         max_tokens_cap=args.max_tokens_cap,
         log_dir=str(log_dir) if log_dir else None,
+        provider=provider,
     )
 
 

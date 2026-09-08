@@ -13,6 +13,11 @@ with `container run -e ANTHROPIC_API_KEY` (the bare-name form, which tells
 `container` to inherit the value from this process). It is never a command-line
 argument, so it does not appear in the host's process list. It is still visible
 inside the VM and in `container inspect` output while the container exists.
+
+Scope: Anthropic, Claude Code, and Apple `container` only. The sanduk package
+is the one that grows providers; this file stays single-provider so it keeps
+running on its own with nothing beside it. tests/test_proxy.py runs the whole
+relay suite against both copies, so the two cannot diverge in behaviour.
 """
 
 import argparse
@@ -88,8 +93,9 @@ HOP = {
 # Credentials arriving from the container are dropped; we supply our own.
 # accept-encoding is dropped and re-offered as gzip in `relay`: the API prefers
 # brotli when a client lists it, and nothing in the standard library decodes it.
-STRIP_REQ = HOP | {"host", "x-api-key", "authorization", "content-length",
-                   "accept-encoding"}
+CREDENTIAL_HEADERS = {"x-api-key", "authorization", "api-key", "x-goog-api-key"}
+STRIP_REQ = HOP | CREDENTIAL_HEADERS | {"host", "content-length",
+                                        "accept-encoding"}
 STRIP_RESP = HOP | {"content-length"}
 
 

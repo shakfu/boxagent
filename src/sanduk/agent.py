@@ -14,6 +14,9 @@ from typing import Any
 
 from sanduk.errors import AgentboxError
 
+# What Claude Code reads inside the container. sanduk.providers declares the
+# same names for the anthropic provider, and the container's variables are
+# named from there; tests/test_providers.py asserts the two agree.
 KEY_ENV = "ANTHROPIC_API_KEY"
 BASE_URL_ENV = "ANTHROPIC_BASE_URL"
 REPORT_NAME = "REPORT.md"

@@ -1,5 +1,5 @@
 """The standalone script embeds a copy of the Containerfile; this proves the
-two do not drift.
+two do not drift, and that the two copies have not diverged outside the relay.
 
 scripts/sanduk.py predates the package and is kept runnable on its own, so it
 carries the image definition inline rather than reading the packaged resource.
@@ -8,6 +8,7 @@ still builds, just not the image the package builds.
 """
 
 import ast
+import importlib.util
 import pathlib
 
 import pytest
@@ -45,6 +46,21 @@ def test_line_continuations_survived_the_embedding():
     lines = embedded_containerfile().splitlines()
     assert sum(1 for line in lines if line.endswith("\\")) == 6
 
+
+# The relay's implementation is no longer AST-comparable. The package's is
+# parameterised by sanduk.providers; the script's is Anthropic-only by design.
+# tests/test_proxy.py runs every relay test against both copies instead, which
+# compares behaviour rather than syntax and is the stronger check.
+# test_the_relay_is_still_compared_behaviourally below keeps that honest.
+BEHAVIOURAL = {
+    "Config.__init__",
+    "Handler.apply_policy",
+    "Handler.authorized",
+    "Handler.relay",
+    "UsageSniffer.__init__",
+    "UsageSniffer._take",
+    "UsageSniffer.digest",
+}
 
 # The package raises AgentboxError where the script calls die(), routes output
 # through util.note, and carries type annotations. Those four differences are by
@@ -107,15 +123,42 @@ def definitions(path):
     return out
 
 
-@pytest.mark.skipif(not SCRIPT.is_file(), reason="scripts/ is not in this tree")
-def test_shared_logic_has_not_drifted():
-    """The relay is the security boundary and exists in both copies. A fix
-    applied to one and not the other is the failure this catches."""
+def _both_sides():
     script = definitions(SCRIPT)
     package = {}
     for module in sorted(PACKAGE.glob("*.py")):
         package.update(definitions(module))
+    return script, package
+
+
+@pytest.mark.skipif(not SCRIPT.is_file(), reason="scripts/ is not in this tree")
+def test_shared_logic_has_not_drifted():
+    """Everything the two copies still share, outside the relay itself."""
+    script, package = _both_sides()
     shared = set(script) & set(package)
-    drifted = {n for n in shared if script[n] != package[n]} - ARCHITECTURAL
+    drifted = {n for n in shared if script[n] != package[n]}
+    drifted -= ARCHITECTURAL | BEHAVIOURAL
     assert not drifted, f"script and package disagree on: {sorted(drifted)}"
-    assert "Handler.relay" in shared, "the relay must be in both copies"
+
+
+@pytest.mark.skipif(not SCRIPT.is_file(), reason="scripts/ is not in this tree")
+def test_excluded_names_are_still_present_in_both_copies():
+    """`shared` is an intersection, so a name deleted from either side leaves it
+    silently. Without this, gutting the relay would read as a pass."""
+    script, package = _both_sides()
+    for name in sorted(BEHAVIOURAL):
+        assert name in script, f"{name} is gone from the script"
+        assert name in package, f"{name} is gone from the package"
+
+
+@pytest.mark.skipif(not SCRIPT.is_file(), reason="scripts/ is not in this tree")
+def test_the_relay_is_still_compared_behaviourally():
+    """BEHAVIOURAL is only safe to exclude while test_proxy.py drives both
+    copies. If that parameterisation goes, the exclusion has to go with it."""
+    spec = importlib.util.spec_from_file_location(
+        "sanduk_test_proxy", pathlib.Path(__file__).parent / "test_proxy.py"
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert set(module.RELAYS) == {"package", "script"}

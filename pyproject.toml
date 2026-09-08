@@ -46,9 +46,10 @@ source-include = ["tests/**", "CHANGELOG.md", "LICENSE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-m 'not container'"
+addopts = "-m 'not container and not provider_live'"
 markers = [
     "container: boots real containers; slow, needs the engine running",
+    "provider_live: talks to a real provider; needs a server or a key",
 ]
 
 [tool.ruff]

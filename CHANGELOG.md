@@ -4,6 +4,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Nothing
 
 ## [Unreleased]
 
+### Added
+
+- Four providers behind `--provider`: `anthropic`, `openai`, `openrouter`, `openai-compat`. A `Provider` record carries the upstream, the auth header and scheme, the environment variable its key comes from, the preflight path, and a route table. The route table maps each allowed path to the wire protocol spoken there, so one structure is the egress allowlist, the field `--max-tokens-cap` clamps, and the names the usage line reads. Protocol hangs off the route rather than the provider because OpenAI serves Responses and Chat Completions on two paths of one host. It is declared rather than detected because Anthropic Messages and OpenAI Responses both report `input_tokens` and `output_tokens`, so a body cannot tell them apart.
+
+- `--upstream scheme://host:port`, which points the relay at a local llama-server or any OpenAI-compatible endpoint. Plaintext to anything but a loopback address is refused: the relay writes the real key into every forwarded request, so `http://` off-machine puts the credential on the wire. `--insecure-upstream` overrides. A path in the upstream is an error rather than a silent truncation, since prefixes belong in the allowlist and the agent's base URL, and OpenRouter's `/api/v1` is exactly the case that would otherwise send every request to the wrong place.
+
+- `--agent-key-env` and `--agent-base-url-env`, naming the variables the agent reads inside the container. They default to the provider's, and are separate from it because the host reads the key under one name and the container may want another. An agent is pointed at the relay with two flags instead of a new module.
+
+- `make test-live` and the `provider_live` marker, deselected by default alongside `container`. `LLAMA_SERVER` runs the openai-compat suite against a local llama-server for nothing; the bad-key tests reach the real Anthropic, OpenAI and OpenRouter endpoints with no credential at all, because refusing an invalid key needs no valid one. Of the two completion tests, OpenRouter needs only a key and defaults to `openrouter/free`, a router over free models, chosen over a pinned `:free` id because those rotate out of the catalogue and take the test with them. OpenAI has no free tier and stays opt-in through `OPENAI_MODEL`, so nothing is spent unless a model is named.
+
+- `stream_options.include_usage` is added to streamed requests for providers that need it. Measured against llama-server: without the field a stream reports no usage at all, with it the counts arrive including cached tokens. The flag sits on the provider rather than the protocol because OpenAI and OpenRouter both speak Chat Completions and only OpenAI needs it; OpenRouter sends usage in the final chunk unasked, in a chunk whose `choices` array is not empty, unlike OpenAI's.
+
+### Changed
+
+- OpenRouter is validated at `/api/v1/key`, not `/api/v1/models`. Measured without a credential: models answers 200 to an anonymous request, so a preflight pointed there would accept any key, including a garbage one, and the 0.27s-against-174s saving it exists for would be imaginary. A live test asserts both halves, the rejection and the miss it replaces.
+
+- The usage line omits a counter its protocol does not report instead of printing zero for it. OpenAI-shaped responses carry no cache-write count, and `cache_write=0` cannot be told apart from a real zero. Cached tokens are read through nested keys for the same reason: OpenAI reports them at `prompt_tokens_details.cached_tokens`, two levels down, where a flat scan dropped them and left `cache_read=0`.
+
+- Model policy, the token cap, and usage injection share one pass over the request body. The old guard returned before parsing unless `--allow-model` or `--max-tokens-cap` was set, which was correct while policing was the only thing that happened there. Left as it was, usage injection would have fired only on runs that also set a policy flag, and silently never on a plain run.
+
+- `start_proxy` takes its allowlist and upstream from the provider rather than from the Anthropic constants. Naming a provider without also naming an allowlist kept Anthropic's, so every OpenAI path 403'd.
+
+- `tests/test_script.py` no longer compares the relay between the package and `scripts/sanduk.py` as syntax. The package's relay is now parameterised by provider and the script's is Anthropic-only by design, so six shared methods diverge on purpose and an AST comparison could only be widened until it meant nothing. `tests/test_proxy.py` runs all twenty relay tests against both copies instead, which compares behaviour. Two guards hold it in place: one asserts the excluded names still exist on both sides, because an intersection drops a deleted name without complaint, and one asserts the parameterisation itself is still there.
+
+- `scripts/sanduk.py` states its scope. It stays Anthropic, Claude Code and Apple `container` only, so it keeps running with nothing beside it.
+
+### Fixed
+
+- The relay forwarded a container-supplied `api-key` header upstream. It dropped `x-api-key` and `authorization`, which were the only two credential headers it used, and passed anything else through. The header is inert against Anthropic and is the credential for Azure OpenAI, so the general shape of the bug is that a header meaning nothing to one provider is the key for the next. All four known credential headers are now dropped whatever the provider. Fixed in `scripts/sanduk.py` too.
+
 ## [0.1.0]
 
 ### Added

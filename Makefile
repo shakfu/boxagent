@@ -51,7 +51,10 @@ test:  ## Fast suite: no containers, no API calls, no key needed
 test-container:  ## Integration suite: boots real containers; needs `make image`
 	@$(RUN) pytest -q -m container
 
-test-all:  ## Both suites
+test-live:  ## Live provider suite: needs LLAMA_SERVER, or a provider key
+	@$(RUN) pytest -q -m provider_live
+
+test-all:  ## Every suite
 	@$(RUN) pytest -q -m ""
 
 coverage:  ## Fast suite with a terminal coverage report

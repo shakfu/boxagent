@@ -12,8 +12,8 @@ import sys
 import urllib.error
 import urllib.request
 
-from sanduk.agent import KEY_ENV
 from sanduk.errors import AgentboxError
+from sanduk.providers import ANTHROPIC_PROVIDER, Provider
 from sanduk.util import run
 
 FIREWALL = "/usr/libexec/ApplicationFirewall/socketfilterfw"
@@ -72,11 +72,17 @@ def firewall_warning() -> None:
     )
 
 
-def validate_key(key: str, base_url: str) -> bool:
-    """One cheap request, so a bad key fails in 0.2s instead of ~174s of retries."""
+def validate_key(key: str, base_url: str, provider: Provider | None = None) -> bool:
+    """One cheap request, so a bad key fails in 0.2s instead of ~174s of retries.
+
+    A provider with no auth has nothing to validate and is skipped.
+    """
+    p = provider or ANTHROPIC_PROVIDER
+    if not p.has_auth:
+        return True
     req = urllib.request.Request(
-        base_url.rstrip("/") + "/v1/models",
-        headers={"x-api-key": key, "anthropic-version": "2023-06-01"},
+        base_url.rstrip("/") + p.validate_path,
+        headers={p.auth_header: p.auth_value(key), **p.validate_headers},
     )
     try:
         with urllib.request.urlopen(req, timeout=15) as r:
@@ -84,7 +90,7 @@ def validate_key(key: str, base_url: str) -> bool:
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
             raise AgentboxError(
-                f"{KEY_ENV} rejected by {base_url} (HTTP {e.code})."
+                f"{p.key_env} rejected by {base_url} (HTTP {e.code})."
             ) from e
         # Any other status still proves the endpoint answered; let the agent try.
         return True
