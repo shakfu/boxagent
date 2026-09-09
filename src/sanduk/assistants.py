@@ -105,7 +105,7 @@ class Assistant:
     provider: str
     model: str | None
     runtime: str | None
-    proxy: bool
+    mode: str
     timeout: int
     every: int
     brief: Path | None
@@ -136,8 +136,9 @@ def load(directory: Path) -> Assistant:
         raise AgentboxError(f"{path}: {e}") from None
 
     unknown = set(conf) - {
-        "name", "agent", "provider", "model", "runtime", "proxy", "timeout",
-        "every", "brief", "gate", "max_failures", "approval", "mounts", "args",
+        "name", "agent", "provider", "model", "runtime", "mode", "proxy",
+        "timeout", "every", "brief", "gate", "max_failures", "approval",
+        "mounts", "args",
     }  # fmt: skip
     if unknown:
         raise AgentboxError(f"{path}: unknown keys {', '.join(sorted(unknown))}")
@@ -153,7 +154,7 @@ def load(directory: Path) -> Assistant:
         provider=str(conf.get("provider", "anthropic")),
         model=None if conf.get("model") is None else str(conf["model"]),
         runtime=None if conf.get("runtime") is None else str(conf["runtime"]),
-        proxy=bool(conf.get("proxy", True)),
+        mode=read_mode(conf, path),
         timeout=int(conf.get("timeout", 900)),
         every=seconds(conf.get("every", DEFAULT_EVERY)),
         brief=resolve("brief"),
@@ -163,13 +164,35 @@ def load(directory: Path) -> Assistant:
         mounts=[anchor(directory, str(m)) for m in conf.get("mounts", [])],
         args=[str(a) for a in conf.get("args", [])],
     )
-    if not assistant.proxy:
+    if assistant.mode == "open":
         # Unattended runs are the ones nobody watches; without the relay the
         # container holds the key and can reach anything.
-        note(f"{assistant.name}: proxy = false, so the container holds the key")
+        note(f"{assistant.name}: mode = open, so the container holds the key")
     if assistant.brief and not assistant.brief.is_file():
         raise AgentboxError(f"{path}: brief {assistant.brief} does not exist")
     return assistant
+
+
+def read_mode(conf: dict[str, object], path: Path) -> str:
+    """`mode`, or the `proxy` boolean it replaced.
+
+    Sealed by default: an unattended run is the one nobody is watching.
+    """
+    # Local: cli imports this module for its commands.
+    from sanduk.cli import MODES
+
+    mode = conf.get("mode")
+    if mode is None:
+        if "proxy" in conf:
+            note(
+                f"{path}: `proxy` is now `mode`; read as mode = "
+                f'"{"sealed" if conf["proxy"] else "open"}"'
+            )
+            return "sealed" if conf["proxy"] else "open"
+        return "sealed"
+    if mode not in MODES:
+        raise AgentboxError(f"{path}: mode {mode!r} is not one of {', '.join(MODES)}")
+    return str(mode)
 
 
 def anchor(directory: Path, spec: str) -> str:
@@ -449,8 +472,7 @@ def run_argv(
         argv += ["--runtime", engine]
     if assistant.model:
         argv += ["--model", assistant.model]
-    if assistant.proxy:
-        argv.append("--proxy")
+    argv += ["--mode", assistant.mode]
     for mount in assistant.mounts:
         argv += ["--mount", mount]
     if stats_file is not None:

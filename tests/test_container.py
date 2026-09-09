@@ -43,6 +43,7 @@ VERSION_MARKER = {
     "hax": r"hax",
     "opencode": r"\d+\.\d+\.\d+",
     "pi": r"\d+\.\d+\.\d+",
+    "prime": r"\d+\.\d+\.\d+",
 }
 
 
@@ -86,7 +87,9 @@ def test_the_image_runs_its_agent():
     out = subprocess.run(
         [ENGINE.cli, "run", "--rm", IMAGE, "--version"], capture_output=True, text=True
     )
-    assert re.search(VERSION_MARKER[AGENT.name], out.stdout), out.stdout
+    # Both streams: prime-agent prints its version on stderr, pi on stdout.
+    printed = out.stdout + out.stderr
+    assert re.search(VERSION_MARKER[AGENT.name], printed), printed
 
 
 def test_default_network_reaches_the_internet():

@@ -19,9 +19,9 @@ RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_VERSION
 RUN printf '%s\n' \
       '#!/bin/sh' \
       'set -e' \
-      'if [ -n "$SANDUK_PI_MODELS" ]; then' \
+      'if [ -n "$SANDUK_MODELS_JSON" ]; then' \
       '  mkdir -p "$PI_CODING_AGENT_DIR"' \
-      '  printf %s "$SANDUK_PI_MODELS" > "$PI_CODING_AGENT_DIR/models.json"' \
+      '  printf %s "$SANDUK_MODELS_JSON" > "$PI_CODING_AGENT_DIR/models.json"' \
       'fi' \
       'exec pi "$@"' \
     > /usr/local/bin/sanduk-pi \

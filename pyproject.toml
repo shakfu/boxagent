@@ -40,6 +40,7 @@ codex = "sanduk.agents.codex:Codex"
 hax = "sanduk.agents.hax:Hax"
 opencode = "sanduk.agents.opencode:OpenCode"
 pi = "sanduk.agents.pi:Pi"
+prime = "sanduk.agents.prime:Prime"
 
 [dependency-groups]
 dev = [

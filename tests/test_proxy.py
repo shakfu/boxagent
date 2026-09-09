@@ -877,3 +877,85 @@ def test_responses_usage_is_read_with_its_own_nesting():
     )
     sniffer.close()
     assert sniffer.digest() == " in=40 cache_read=32 out=9"
+
+
+# --- chunked requests -------------------------------------------------------
+
+
+def test_a_chunked_request_body_is_read_and_forwarded(relay):
+    """A client that streams its request sends no Content-Length. Reading zero
+    bytes there left the body in the socket, where the next parse read it as a
+    request line and answered 400. Measured with prime-agent, whose system
+    prompt is large enough that its client streams the request."""
+    port, seen, _ = relay()
+    payload = json.dumps(
+        {
+            "model": "m",
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "x" * 5000}],
+        }
+    ).encode()
+    conn = http.client.HTTPConnection("127.0.0.1", port)
+    conn.request(
+        "POST",
+        "/v1/messages",
+        body=iter([payload[:2000], payload[2000:]]),
+        headers={"x-api-key": TOKEN, "content-type": "application/json"},
+    )
+    response = conn.getresponse()
+    response.read()
+    assert response.status == 200
+    assert seen["body"] == json.loads(payload)
+    conn.close()
+
+
+def test_a_chunked_request_survives_a_second_on_one_connection(relay):
+    """The failure this fixes was a leftover body parsed as the next request,
+    so one request through a fresh connection proves nothing."""
+    port, seen, _ = relay()
+    conn = http.client.HTTPConnection("127.0.0.1", port)
+    for n in range(2):
+        body = json.dumps({"model": "m", "max_tokens": 8, "n": n}).encode()
+        conn.request(
+            "POST",
+            "/v1/messages",
+            body=iter([body]),
+            headers={"x-api-key": TOKEN, "content-type": "application/json"},
+        )
+        response = conn.getresponse()
+        response.read()
+        assert response.status == 200, n
+        assert seen["body"]["n"] == n
+    conn.close()
+
+
+def test_a_malformed_chunk_size_is_refused(relay):
+    port, _, _ = relay()
+    conn = http.client.HTTPConnection("127.0.0.1", port)
+    conn.putrequest("POST", "/v1/messages", skip_accept_encoding=True)
+    conn.putheader("x-api-key", TOKEN)
+    conn.putheader("content-type", "application/json")
+    conn.putheader("Transfer-Encoding", "chunked")
+    conn.endheaders()
+    conn.send(b"zz\r\nnonsense\r\n0\r\n\r\n")
+    assert conn.getresponse().status == 400
+    conn.close()
+
+
+def test_a_refused_request_closes_its_connection(relay):
+    """The body is still unread when a refusal is written. Reusing the
+    connection had the next parse read that body as a request line, and every
+    later request on it answered 400."""
+    port, _, _ = relay()
+    conn = http.client.HTTPConnection("127.0.0.1", port)
+    conn.request(
+        "POST",
+        "/v1/messages",
+        body=message(),
+        headers={"x-api-key": "wrong", "content-type": "application/json"},
+    )
+    response = conn.getresponse()
+    response.read()
+    assert response.status == 401
+    assert response.will_close, "a refused connection must not be reused"
+    conn.close()

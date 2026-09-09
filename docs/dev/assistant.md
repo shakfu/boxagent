@@ -23,7 +23,7 @@ name    = "triage"
 agent   = "pi"
 provider = "anthropic"
 model   = "claude-sonnet-5"
-proxy   = true
+mode    = "sealed"     # open | key-safe | sealed
 timeout = 900
 
 every   = "30m"        # interval, not cron: no parser, no dependency

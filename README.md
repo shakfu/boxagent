@@ -4,7 +4,7 @@
 
 sanduk is a Python CLI tool and package that makes it easy to run an agent inside a disposable container. The agent does its work, writes a report to a bind-mounted directory, and when it’s finished, the container is deleted.
 
-Five agents ship: Claude Code, [codex](https://github.com/openai/codex), [hax](https://github.com/OleksandrChekhovskyi/hax), [opencode](https://github.com/sst/opencode), and [pi](https://github.com/earendil-works/pi). Two container engines: Apple's [`container`](https://github.com/apple/container) on macOS, and `docker`. Each sits behind a registry -- an agent behind `sanduk.agent.Agent`, an engine behind `sanduk.runtime.Runtime` -- so another of either is one class. An agent can live in your own package and be found by entry point; see [docs/agents.md](docs/agents.md). Podman is not implemented.
+Six agents ship: Claude Code, [codex](https://github.com/openai/codex), [hax](https://github.com/OleksandrChekhovskyi/hax), [opencode](https://github.com/sst/opencode), [pi](https://github.com/earendil-works/pi), and [prime-agent](https://github.com/PrimeIntellect-ai/prime-agent). Two container engines: Apple's [`container`](https://github.com/apple/container) on macOS, and `docker`. Each sits behind a registry -- an agent behind `sanduk.agent.Agent`, an engine behind `sanduk.runtime.Runtime` -- so another of either is one class. An agent can live in your own package and be found by entry point; see [docs/agents.md](docs/agents.md). Podman is not implemented.
 
 Four providers are supported: Anthropic, OpenAI, OpenRouter, and any OpenAI-compatible server, which includes a local `llama-server`. See [Providers](#providers).
 
@@ -42,7 +42,7 @@ The wheel carries a `Containerfile` per agent, so `sanduk build` works from a pl
 pip install sanduk
 export ANTHROPIC_API_KEY=sk-ant-...
 sanduk build                                              # the claude image
-sanduk run 'Summarise every Python file here.' -w ./work --proxy
+sanduk run 'Summarise every Python file here.' -w ./work --mode sealed
 sanduk --help
 ```
 
@@ -58,21 +58,27 @@ make run TASK='Summarise every Python file here.' WORK=./work
 
 `make` targets call `uv run sanduk`, so an editable checkout and an installed copy take the same flags.
 
-## Two modes
+## Three modes
 
-|                                   | default          | `--proxy`                        | `--proxy` + local model |
-| --------------------------------- | ---------------- | -------------------------------- | ----------------------- |
-| Host filesystem                    | container only   | container only                   | container only          |
-| API key location                   | in the container | host only; the container holds a run token | there is no key |
-| Egress                             | unrestricted     | none                             | none                    |
-| Agent can POST your source anywhere| yes              | no                               | no                      |
-| Which endpoints the agent may call | all              | the provider's, matched exactly   | the provider's, matched exactly |
-| Leaves the machine                 | yes              | the prompt and every file read   | nothing                 |
-| Record of what it sent upstream    | none             | `--log-bodies`                   | `--log-bodies`          |
+`--mode` sets two properties: whether the host keeps the key, and whether the container has a route off it.
 
-The default mode is filesystem isolation and nothing more. `--proxy` is where the containment is.
+|                                   | `open` (default) | `key-safe`                       | `sealed`                        |
+| --------------------------------- | ---------------- | -------------------------------- | ------------------------------- |
+| Host filesystem                    | container only   | container only                   | container only                  |
+| API key location                   | in the container | host only; the container holds a run token | host only; the container holds a run token |
+| Egress                             | unrestricted     | unrestricted                     | none                            |
+| Agent can POST your source anywhere| yes              | yes                              | no                              |
+| Which model endpoints it may call  | all              | the provider's, matched exactly   | the provider's, matched exactly |
+| Model policy (`--allow-model`, `--max-tokens-cap`) | none | enforced on the host     | enforced on the host            |
+| Record of what it sent upstream    | none             | `--log-bodies`, model calls only | `--log-bodies`, every call      |
 
-With a local model the relay is no longer protecting a credential, because there is not one. What it still does is hold the agent to an exact path allowlist, enforce the model and token policy where the container cannot edit it, and record what was sent.
+`open` is filesystem isolation and nothing more. `sealed` is where the containment is: the network is created with `--internal`, so the relay on the bridge gateway is the only address the container can reach.
+
+`key-safe` is the same relay on a routable network. It exists for runs that need `npm install`, `pip install` or `git clone` and must not hold your key. It buys credential protection and keeps the model policy; it buys no containment, and the audit trail stops being complete, because what the agent sends anywhere else never passes the relay.
+
+`--proxy` still works as the old spelling of `--mode sealed`.
+
+Against a local model the relay is no longer protecting a credential, because there is not one. What it still does is hold the agent to an exact path allowlist, enforce the model and token policy where the container cannot edit it, and record what was sent.
 
 ## Commands
 
@@ -83,7 +89,7 @@ sanduk shell               interactive shell in that image
 sanduk ps                  list sanduk containers
 sanduk stop                stop them, leaving them on disk
 sanduk clean               stop and delete them
-sanduk destroy             clean, plus the image and the network
+sanduk destroy             clean, plus the image and every mode's network
 sanduk system status       whether the engine is ready
 sanduk list agents         what each registered handler speaks
 sanduk list providers      the URL an agent must be given, per provider
@@ -118,7 +124,7 @@ A local model:
 
 ```text
 llama-server -m ~/.models/some-model.gguf --port 8080 --alias local-model
-sanduk run 'Review this.' -w ./repo --proxy \
+sanduk run 'Review this.' -w ./repo --mode sealed \
     --provider openai-compat --upstream http://127.0.0.1:8080 --model local-model
 ```
 
@@ -136,12 +142,13 @@ The relay only forwards. It does not translate between protocols, so the agent h
 --agent hax        hax           every provider
 --agent opencode   opencode      every provider
 --agent pi         pi            every provider
+--agent prime      prime-agent   every provider
 ```
 
-A handler says which image carries the agent, what flags drive it headlessly, which variables it reads its endpoint from, and how to read its JSON stream. Nothing else about a run differs, so a sixth agent is a class in your own package, advertised in the `sanduk.agents` entry-point group or named directly as `--agent mypkg.handlers:MyAgent`. See [docs/agents.md](docs/agents.md).
+A handler says which image carries the agent, what flags drive it headlessly, which variables it reads its endpoint from, and how to read its JSON stream. Nothing else about a run differs, so a seventh agent is a class in your own package, advertised in the `sanduk.agents` entry-point group or named directly as `--agent mypkg.handlers:MyAgent`. See [docs/agents.md](docs/agents.md).
 
 ```text
-sanduk run 'Review this.' -w ./repo --proxy --agent hax \
+sanduk run 'Review this.' -w ./repo --mode sealed --agent hax \
     --provider openrouter --model anthropic/claude-sonnet-5
 ```
 
@@ -151,9 +158,11 @@ codex accepts only `wire_api = "responses"`, so it pairs with `openai` or with a
 
 opencode takes its whole configuration from `OPENCODE_CONFIG_CONTENT`, so no `opencode.json` is written into the bind mount, where it would sit in your repository and be editable by the agent reading it. The provider block picks an npm driver by wire protocol: `@ai-sdk/anthropic` for Messages, `@ai-sdk/openai-compatible` for Chat Completions. Both are installed in the image, because the proxy network has no route to fetch one at runtime. `--model` is required: the config names one model and there is nothing to put in it otherwise.
 
+prime-agent is pi's CLI in PrimeIntellect's build: the release tarball declares `bin: prime-agent` and depends on the `@earendil-works/pi-*` packages, so its handler is a subclass of pi's and inherits the reader, the argv and the protocols. Three things differ, each measured rather than read. Its provider block names the credential's variable bare where pi writes `$NAME`. It has no `--no-approve`, so a `.prime/agent/settings.json` in the mounted directory is read: that steers the run without widening the box, which is the container and the relay either way. And its only tool is a Python REPL, so the image carries the kernel; without it the agent answers by trying to install `uv`, which the proxy network has no route for. The image installs a checksummed release tarball rather than an npm package.
+
 pi speaks all three protocols the relay carries, and its provider block names which one with an `api` field. It reads providers from `models.json` in its config directory, not from a variable or a flag, so the image's entrypoint writes that file from `SANDUK_PI_MODELS` and pi is never given the bind mount as a place to find one. `--model` is required, and `--no-approve` is passed so a `.pi/settings.json` in the mounted repository cannot steer the run. With `--provider anthropic` the base URL is the bare root: pi appends `/v1/messages` itself.
 
-## How --proxy works
+## How the relay works
 
 1. `sanduk-net` is created with `--internal`: no route off the host.
 
@@ -201,6 +210,7 @@ brief    = "brief.md"
 gate     = "gate.sh"      # optional: a non-zero exit skips the wakeup, unpaid
 timeout  = 900
 max_failures = 3
+mode     = "sealed"       # open | key-safe | sealed, as above
 approval = false          # true: results wait for `sanduk approve` before delivery
 mounts   = ["../repo:/repo:ro"]   # host paths are relative to this file
 args     = []             # extra `sanduk run` flags, verbatim
@@ -237,7 +247,7 @@ What outlives a wakeup lives in SQLite at `$XDG_STATE_HOME/sanduk/assistants.db`
 
 `mounts` puts other host directories in the container, resolved from the config file's own directory, so an assistant can read a repository it must not write: `mounts = ["../repo:/repo:ro"]`.
 
-Two things to hold onto. `proxy` defaults to true and should stay there: an unattended run is the one nobody is watching. And whatever the agent writes into `workspace/` is read as instruction on the next wakeup, which is memory and also a channel between runs -- keep it somewhere you read the diffs.
+Two things to hold onto. `mode` defaults to `sealed` and should stay there: an unattended run is the one nobody is watching. And whatever the agent writes into `workspace/` is read as instruction on the next wakeup, which is memory and also a channel between runs -- keep it somewhere you read the diffs.
 
 ## Layout
 
@@ -249,7 +259,8 @@ src/sanduk/
     agent.py       the agent strategy: interface, registry, plugin loading
     runs.py        which process owns which container; the orphan sweep
     assistants.py  identity, schedule, mailbox: the assistant commands
-    agents/        the shipped handlers: claude.py, codex.py, hax.py, opencode.py, pi.py
+    agents/        the shipped handlers: claude.py, codex.py, hax.py,
+                   opencode.py, pi.py, prime.py
     proxy.py       the host-side relay
     preflight.py   key validation, macOS firewall check
     resources/
@@ -258,6 +269,7 @@ src/sanduk/
         Containerfile.hax
         Containerfile.opencode
         Containerfile.pi
+        Containerfile.prime
 ```
 
 Another agent is an `Agent` subclass in any package; see [docs/agents.md](docs/agents.md). A third engine is a `Runtime` subclass and a `RUNTIMES` entry. It must supply four things: the CLI name, the verb that deletes a container (`rm`, not `delete`), how `network inspect` reports the gateway, and whether the host bridge needs a placeholder container to exist at all.
@@ -279,7 +291,7 @@ make qa               lint-check, format-check, typecheck, test
 make image            Build the agent image if missing
 make image-rebuild    Force a rebuild
 make run              TASK='...' WORK=./dir ARGS='--effort max'
-make run-proxy        Same, with no egress and the key held on the host
+make run-proxy        Same, sealed: no egress, key held on the host
 make shell            Interactive shell in the image
 make ps / make logs   Containers / recorded request bodies
 make stop             Stop sanduk containers, leave them on disk
@@ -330,7 +342,9 @@ The per-agent rows are one task and one local model, counted by the relay throug
 | One task, one model, input tokens per run: pi | 4.8-5.1k |
 | The same task: codex | 12.8-20.8k |
 | The same task: opencode | 23.4k |
-| Container direct egress on `sanduk-net` | `000` |
+| The same task: prime-agent | 14.8k |
+| Container direct egress on `sanduk-net` (sealed) | `000` |
+| The same on `sanduk-open` (key-safe) | `401`: it reached the provider |
 | Real keys in the container, with all three exported | 0 of 3 |
 | OpenRouter `/api/v1/models`, no credential | `200` |
 | OpenRouter `/api/v1/key`, no credential | `401` |

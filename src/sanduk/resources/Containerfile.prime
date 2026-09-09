@@ -1,0 +1,62 @@
+# prime-agent is pi's CLI in PrimeIntellect's build: the release tarball
+# declares `bin: prime-agent` and depends on `@earendil-works/pi-*`.
+#
+# Installed from the release rather than through their install.sh: the script
+# also bootstraps node and prompts, both of which this image already settles.
+# The root tarball's checksum is verified against the release manifest here.
+# Its three dependencies are absolute URLs inside the same pinned release, so
+# npm fetches them by version from the same origin.
+FROM docker.io/library/node:22-slim
+
+ARG PRIME_AGENT_VERSION=0.9.4
+ARG PRIME_AGENT_BASE_URL=https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git ripgrep ca-certificates curl jq python3 \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    release="${PRIME_AGENT_BASE_URL}/releases/v${PRIME_AGENT_VERSION}"; \
+    tarball="prime-agent-${PRIME_AGENT_VERSION}.tgz"; \
+    cd /tmp; \
+    curl -fsSL -o "$tarball" "${release}/${tarball}"; \
+    curl -fsSL -o SHA256SUMS "${release}/SHA256SUMS"; \
+    grep " ${tarball}\$" SHA256SUMS | sha256sum -c -; \
+    HOME=/home/node \
+    PRIME_AGENT_CODING_AGENT_DIR=/home/node/.prime/agent \
+    PRIME_AGENT_INSTALL_UV=1 \
+    PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL=1 \
+    PRIME_AGENT_BOOTSTRAP_TOOLS_ON_INSTALL=1 \
+    npm install -g "/tmp/${tarball}"; \
+    rm -f "/tmp/${tarball}" /tmp/SHA256SUMS; \
+    npm cache clean --force; \
+    chown -R node:node /home/node
+
+# prime-agent's only tool is a Python REPL, so the image has to carry the
+# kernel: without it the agent answers by trying to install uv, which the proxy
+# network has no route for. The postinstall builds it when these are set.
+# The endpoint is a file in the config directory, and sanduk knows the relay's
+# address only at run time. The entrypoint writes the file from the
+# environment, so the config never touches the bind mount, where it would sit
+# in the user's repository and be editable by the agent reading it.
+RUN printf '%s\n' \
+      '#!/bin/sh' \
+      'set -e' \
+      'if [ -n "$SANDUK_MODELS_JSON" ]; then' \
+      '  mkdir -p "$PRIME_AGENT_CODING_AGENT_DIR"' \
+      '  printf %s "$SANDUK_MODELS_JSON" > "$PRIME_AGENT_CODING_AGENT_DIR/models.json"' \
+      'fi' \
+      'exec prime-agent "$@"' \
+    > /usr/local/bin/sanduk-prime \
+ && chmod +x /usr/local/bin/sanduk-prime
+
+RUN mkdir -p /work && chown node:node /work
+USER node
+ENV HOME=/home/node \
+    PATH=/home/node/.local/bin:$PATH \
+    PRIME_AGENT_CODING_AGENT_DIR=/home/node/.prime/agent \
+    PI_OFFLINE=1 \
+    PI_SKIP_VERSION_CHECK=1 \
+    PI_TELEMETRY=0
+WORKDIR /work
+ENTRYPOINT ["sanduk-prime"]

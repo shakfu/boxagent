@@ -157,13 +157,23 @@ class Runtime:
         """(gateway, subnet), or None if the network does not exist."""
         raise NotImplementedError
 
-    def ensure_network(self, name: str) -> tuple[str, str]:
-        """Create `name` as an egress-blocked network if it is not already there."""
+    def ensure_network(self, name: str, internal: bool = True) -> tuple[str, str]:
+        """Create `name` if it is not already there, and return (gateway, subnet).
+
+        `internal` is the only difference between sanduk's two relayed modes:
+        without a route off the host, the relay is the one address a container
+        can reach; with one, the relay still holds the key and the container
+        reaches everything else too.
+        """
         info = self.network_info(name)
         if info:
             return info
-        note(f"creating internal network {name}")
-        r = run([self.cli, "network", "create", "--internal", name], capture_output=True)
+        kind = "internal" if internal else "routable"
+        note(f"creating {kind} network {name}")
+        argv = [self.cli, "network", "create"]
+        if internal:
+            argv.append("--internal")
+        r = run([*argv, name], capture_output=True)
         if r.returncode != 0:
             raise AgentboxError(f"could not create network {name}: {r.stderr.strip()}")
         info = self.network_info(name)

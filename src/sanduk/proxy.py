@@ -66,6 +66,9 @@ STRIP_REQ = (
 )
 STRIP_RESP = HOP | {"content-length"}
 
+# A chunk-size line is a few hex digits; anything longer is not one.
+CHUNK_LINE_MAX = 1024
+
 
 class Config:
     """One run's relay policy and counters."""
@@ -230,6 +233,11 @@ class Handler(BaseHTTPRequestHandler):
         self.note(f"REJECT {self.client_address[0]} {self.command} {self.path}: {why}")
         body = b'{"type":"error","error":{"type":"forbidden"}}'
         self.send_response(code)
+        # The request body is still in the socket, unread: a refusal happens
+        # before it is worth reading. Reusing the connection had the next parse
+        # read that body as a request line and answer 400 to everything after
+        # it. The header both tells the client and sets close_connection.
+        self.send_header("Connection", "close")
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -317,14 +325,50 @@ class Handler(BaseHTTPRequestHandler):
             digest += f" -> {path}"
         self.note(digest)
 
+    def read_body(self) -> bytes | None:
+        """The request body, however it arrived.
+
+        A client that streams its request sends `Transfer-Encoding: chunked`
+        and no `Content-Length`. Reading zero bytes there left the body in the
+        socket, where the next parse read it as a request line and answered
+        400. Measured with prime-agent, whose system prompt is large enough
+        that its client streams the request.
+        """
+        if "chunked" in self.headers.get("Transfer-Encoding", "").lower():
+            return self.read_chunked()
+        length = int(self.headers.get("Content-Length") or 0)
+        return self.rfile.read(length) if length else None
+
+    def read_chunked(self) -> bytes:
+        """De-chunk into memory. The relay forwards with a Content-Length of
+        its own, and `transfer-encoding` is a hop header it drops anyway."""
+        body = bytearray()
+        while True:
+            line = self.rfile.readline(CHUNK_LINE_MAX).strip()
+            size = int(line.split(b";")[0] or b"0", 16)
+            if size == 0:
+                break
+            body += self.rfile.read(size)
+            self.rfile.read(2)  # the CRLF that ends each chunk
+        # Trailers, then the blank line that closes them.
+        while self.rfile.readline(CHUNK_LINE_MAX).strip():
+            pass
+        return bytes(body)
+
     def relay(self) -> None:
         if not self.authorized():
             return
         cfg = self.cfg
         started = time.monotonic()
 
-        length = int(self.headers.get("Content-Length") or 0)
-        body = self.rfile.read(length) if length else None
+        try:
+            body = self.read_body()
+        except ValueError:
+            # What is left in the socket is not a request, so this connection
+            # cannot be reused: the next parse would answer 400 as well.
+            self.close_connection = True
+            self.refuse(400, "malformed chunked request body")
+            return
         body, keep_going = self.apply_policy(body)
         if not keep_going:
             return

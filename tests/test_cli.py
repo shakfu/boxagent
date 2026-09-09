@@ -422,7 +422,7 @@ def test_destroy_removes_the_containers_image_and_network(engine):
     assert main(["destroy", "--agent", "hax", "--proxy-network", "sanduk-ci"]) == 0
     assert engine.destroyed == ["sanduk-a1b2"]
     assert engine.deleted_images == ["sanduk-hax:latest"]
-    assert engine.deleted_networks == ["sanduk-ci"]
+    assert engine.deleted_networks == ["sanduk-ci", "sanduk-open", "sanduk-net"]
 
 
 def test_destroy_leaves_the_request_body_log_alone(engine, tmp_path, monkeypatch):
@@ -619,3 +619,77 @@ def test_approving_something_already_decided_says_so(assistant_dir, capsys):
     )
     assert main(["approve", "1"]) == 0
     assert "already" in capsys.readouterr().err
+
+
+# --- containment modes ------------------------------------------------------
+
+
+def test_the_default_mode_relays_nothing():
+    """The container holds the key and reaches anything: filesystem isolation
+    and nothing more."""
+    args = parse_args(["run", "task"])
+    assert args.mode == "open"
+    assert args.proxy is False and args.egress is True
+
+
+@pytest.mark.parametrize(
+    ("mode", "relayed", "egress", "network"),
+    [
+        ("open", False, True, "sanduk-net"),
+        ("key-safe", True, True, "sanduk-open"),
+        ("sealed", True, False, "sanduk-net"),
+    ],
+)
+def test_each_mode_is_two_properties(mode, relayed, egress, network):
+    args = parse_args(["run", "task", "--mode", mode])
+    assert (args.proxy, args.egress) == (relayed, egress)
+    assert args.proxy_network == network
+
+
+def test_proxy_is_the_old_spelling_of_sealed():
+    """A command line written against 0.2.x still runs."""
+    args = parse_args(["run", "task", "--proxy"])
+    assert args.mode == "sealed"
+    assert args.proxy is True and args.egress is False
+
+
+def test_the_old_spelling_cannot_contradict_the_new_one():
+    with pytest.raises(AgentboxError, match="old spelling"):
+        parse_args(["run", "task", "--proxy", "--mode", "open"])
+
+
+def test_an_unknown_mode_is_refused_by_argparse():
+    with pytest.raises(SystemExit):
+        parse_args(["run", "task", "--mode", "airgapped"])
+
+
+def test_a_named_network_survives_the_mode_that_would_pick_one(tmp_path):
+    args = parse_args(["run", "task", "--mode", "key-safe", "--proxy-network", "mine"])
+    assert args.proxy_network == "mine"
+
+
+def test_only_sealed_asks_for_a_network_with_no_route_off_the_host(tmp_path, monkeypatch):
+    """key-safe is the same relay on a routable network: the key stays here and
+    the container still reaches the internet."""
+    seen = {}
+
+    class Engine(StubEngine):
+        def ensure_network(self, name, internal=True):
+            seen[name] = internal
+            return "10.0.0.1", "10.0.0.0/24"
+
+        def run_argv(self, spec):
+            return ["stub", "run", spec.image]
+
+    stub = Engine()
+    monkeypatch.setattr("sanduk.cli.get_runtime", lambda _: stub)
+    for mode in ("sealed", "key-safe"):
+        main(["run", "task", "-w", str(tmp_path), "--mode", mode, "--dry-run"])
+    assert seen == {"sanduk-net": True, "sanduk-open": False}
+
+
+def test_destroy_takes_every_network_a_mode_creates(engine):
+    """A run in one mode and a destroy in another used to leave the other
+    mode's bridge behind."""
+    assert main(["destroy"]) == 0
+    assert set(engine.deleted_networks) == {"sanduk-net", "sanduk-open"}

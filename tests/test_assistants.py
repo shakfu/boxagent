@@ -80,8 +80,8 @@ def test_a_config_is_read_with_the_directory_as_its_root(home):
     assert found.brief == home / "brief.md"
     assert found.workspace == home / "workspace"
     # Not stated in the config, so the defaults that matter for an unattended
-    # run: the relay on, and a bounded wakeup.
-    assert found.proxy and found.timeout == 900
+    # run: the strictest mode, and a bounded wakeup.
+    assert found.mode == "sealed" and found.timeout == 900
 
 
 def test_a_missing_config_says_where_it_looked(state):
@@ -102,10 +102,33 @@ def test_a_brief_that_is_not_there_fails_at_load(home):
         assistants.load(home)
 
 
-def test_turning_the_relay_off_says_so(home, capsys):
-    (home / "assistant.toml").write_text(CONFIG + "\nproxy = false\n")
-    assistants.load(home)
+def test_opening_the_container_up_says_so(home, capsys):
+    (home / "assistant.toml").write_text(CONFIG + '\nmode = "open"\n')
+    assert assistants.load(home).mode == "open"
     assert "holds the key" in capsys.readouterr().err
+
+
+def test_the_boolean_mode_replaced_still_reads(home, capsys):
+    """`proxy = false` was the old spelling of `mode = "open"`."""
+    (home / "assistant.toml").write_text(CONFIG + "\nproxy = false\n")
+    assert assistants.load(home).mode == "open"
+    assert "`proxy` is now `mode`" in capsys.readouterr().err
+
+
+def test_a_mode_that_does_not_exist_names_the_ones_that_do(home):
+    (home / "assistant.toml").write_text(CONFIG + '\nmode = "airgapped"\n')
+    with pytest.raises(AgentboxError, match="key-safe"):
+        assistants.load(home)
+
+
+def test_a_key_safe_assistant_passes_the_mode_through(db, home, ran):
+    calls, _ = ran
+    (home / "assistant.toml").write_text(CONFIG + '\nmode = "key-safe"\n')
+    found = assistants.load(home)
+    assistants.register(db, found)
+    assistants.wake(db, found)
+    argv = calls[0]
+    assert argv[argv.index("--mode") + 1] == "key-safe"
 
 
 # --- state ------------------------------------------------------------------
@@ -203,7 +226,7 @@ def test_a_wakeup_runs_the_run_command_and_nothing_else(db, registered, ran):
     assert assistants.wake(db, registered) == 0
     argv = calls[0]
     assert argv[0] == "run"
-    assert "--proxy" in argv
+    assert argv[argv.index("--mode") + 1] == "sealed"
     assert argv[argv.index("--agent") + 1] == "pi"
     assert argv[argv.index("--model") + 1] == "local-model"
     assert argv[argv.index("-w") + 1] == str(registered.workspace)

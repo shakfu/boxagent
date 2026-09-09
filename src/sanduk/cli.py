@@ -24,6 +24,7 @@ import subprocess
 import sys
 import time
 import uuid
+from collections import namedtuple
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -88,6 +89,18 @@ COMMANDS = (
 # Where -w lands inside the container. Every other mount is refused this path
 # and anything under it.
 WORKDIR_DEST = "/work"
+
+# What a mode is, in the two properties that differ: whether the host keeps the
+# key, and whether the container has a route off the host. The fourth
+# combination -- the key in the container, no route to any provider -- is a run
+# that cannot call anything, so it is not a mode.
+Mode = namedtuple("Mode", "relayed egress network")
+MODES = {
+    "open": Mode(relayed=False, egress=True, network=None),
+    "key-safe": Mode(relayed=True, egress=True, network="sanduk-open"),
+    "sealed": Mode(relayed=True, egress=False, network="sanduk-net"),
+}
+DEFAULT_MODE = "open"
 
 RUN_EPILOG = (
     "The API key comes from the provider's environment variable only.\n"
@@ -268,18 +281,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "the container (default: the provider's)",
     )
 
-    g = p.add_argument_group("proxy (key never enters the container)")
+    g = p.add_argument_group("containment")
     g.add_argument(
-        "--proxy",
-        action="store_true",
-        help="run the agent on an egress-blocked network and relay "
-        "its API calls through a host-side proxy that holds the "
-        "key. The container gets a per-run token instead.",
+        "--mode",
+        choices=list(MODES),
+        default=None,
+        help="open: the container holds the key and reaches anything. "
+        "key-safe: the key stays on the host, the container still reaches "
+        "anything. sealed: the key stays on the host and the container has no "
+        f"route off it (default: {DEFAULT_MODE})",
     )
+    # The flag `--mode sealed` replaced. Kept working, and out of --help, so a
+    # command line written against 0.2.x still runs.
+    g.add_argument("--proxy", action="store_true", help=argparse.SUPPRESS)
     g.add_argument(
         "--proxy-network",
-        default="sanduk-net",
-        help="internal network to create/use (default: sanduk-net)",
+        default=None,
+        help="network to create/use (default: sanduk-net sealed, sanduk-open key-safe)",
     )
     g.add_argument(
         "--proxy-port",
@@ -328,7 +346,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--dry-run", action="store_true", help="print the container command and exit"
     )
     g.add_argument("--skip-key-check", action="store_true")
-    return root.parse_args(argv)
+    args = root.parse_args(argv)
+    return resolve_mode(args)
+
+
+def resolve_mode(args: argparse.Namespace) -> argparse.Namespace:
+    """Turn `--mode` (or the `--proxy` alias) into the two properties the run
+    path reads: `args.proxy` for where the key lives, `args.egress` for the
+    route off the host."""
+    if getattr(args, "command", None) != "run":
+        return args
+    if args.mode is None:
+        args.mode = "sealed" if args.proxy else DEFAULT_MODE
+    elif args.proxy and args.mode != "sealed":
+        raise AgentboxError(
+            f"--proxy is the old spelling of --mode sealed; it cannot be "
+            f"combined with --mode {args.mode}"
+        )
+    mode = MODES[args.mode]
+    args.proxy = mode.relayed
+    args.egress = mode.egress
+    if args.proxy_network is None:
+        args.proxy_network = mode.network or MODES["sealed"].network
+    return args
 
 
 def _add_engine_commands(
@@ -375,8 +415,7 @@ def _add_engine_commands(
     p.add_argument("-i", "--image", help="image to delete (default: the agent's)")
     p.add_argument(
         "--proxy-network",
-        default="sanduk-net",
-        help="network to delete (default: sanduk-net)",
+        help="also delete this network (default: every network a mode creates)",
     )
     p.set_defaults(containerfile=None, all=False)
 
@@ -548,8 +587,21 @@ def destroy(args: argparse.Namespace) -> int:
     _, image, _ = resolve_image(args)
     clean(args)
     runtime.delete_image(image)
-    runtime.delete_network(args.proxy_network)
+    for network in mode_networks(args.proxy_network):
+        runtime.delete_network(network)
     return 0
+
+
+def mode_networks(named: str | None = None) -> list[str]:
+    """Every network a mode creates, plus one the caller named.
+
+    `destroy` says it removes everything sanduk made. Deleting only the mode's
+    default left the other mode's bridge behind, and which mode you ran last
+    week is not a question a cleanup verb should ask.
+    """
+    found = [named] if named else []
+    found += [mode.network for mode in MODES.values() if mode.network]
+    return list(dict.fromkeys(found))
 
 
 def system(args: argparse.Namespace) -> int:
@@ -771,7 +823,7 @@ def run(args: argparse.Namespace) -> int:
         runtime.require()
         firewall_warning()
         network = args.proxy_network
-        gateway, _ = runtime.ensure_network(network)
+        gateway, _ = runtime.ensure_network(network, internal=not args.egress)
         token = secrets.token_urlsafe(24)
         if not args.dry_run:
             if args.rebuild or not runtime.image_exists(sel.image):
@@ -816,9 +868,15 @@ def run(args: argparse.Namespace) -> int:
     if args.rebuild or not runtime.image_exists(sel.image):
         runtime.build_image(sel.image, sel.containerfile)
 
-    if args.proxy:
+    if args.proxy and args.egress:
         note(
-            f"proxy bound to {gateway}:{port} (bridge only); "
+            f"relay bound to {gateway}:{port} (bridge only); the key stays "
+            f"here, and {network} reaches the internet: what the agent sends "
+            f"anywhere else is neither relayed nor recorded"
+        )
+    elif args.proxy:
+        note(
+            f"relay bound to {gateway}:{port} (bridge only); "
             f"{network} has no route off the host"
         )
     note(f"{name} -> {workdir}")

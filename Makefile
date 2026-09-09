@@ -132,8 +132,8 @@ image-rebuild:  ## Rebuild the agent image unconditionally
 run:  ## Run the agent. TASK='...' WORK=./dir AGENT=hax ARGS='--effort max'
 	@$(RUN) sanduk run "$(TASK)" -w $(WORK) --agent $(AGENT) $(ARGS) --runtime $(RUNTIME)
 
-run-proxy:  ## Run with no egress and the key held on the host
-	@$(RUN) sanduk run "$(TASK)" -w $(WORK) --agent $(AGENT) --proxy $(ARGS) --runtime $(RUNTIME)
+run-proxy:  ## Run sealed: no egress, and the key held on the host
+	@$(RUN) sanduk run "$(TASK)" -w $(WORK) --agent $(AGENT) --mode sealed $(ARGS) --runtime $(RUNTIME)
 
 shell:  ## Interactive shell in the agent image (no network, nothing mounted)
 	@$(RUN) sanduk shell --agent $(AGENT) --runtime $(RUNTIME)

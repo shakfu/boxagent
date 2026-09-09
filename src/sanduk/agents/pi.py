@@ -5,7 +5,7 @@ It picks one per provider through the `api` field of a custom provider block.
 
 The endpoint is neither a variable nor a flag: pi reads providers from
 `models.json` in its config directory. The image's entrypoint writes that file
-from `SANDUK_PI_MODELS` before exec'ing pi, so the config lands in the
+from `SANDUK_MODELS_JSON` before exec'ing pi, so the config lands in the
 container's home rather than the bind mount, where it would sit in the user's
 repository and be editable by the agent reading it.
 """
@@ -34,6 +34,8 @@ from sanduk.providers import (
 
 PROVIDER_ID = "sanduk"
 KEY_ENV = "PI_RELAY_KEY"
+# sanduk's own variable, read by the entrypoint in each image, not by pi.
+CONFIG_ENV = "SANDUK_MODELS_JSON"
 
 APIS = {
     ANTHROPIC_MESSAGES: "anthropic-messages",
@@ -144,6 +146,14 @@ class Pi(Agent):
     image = "sanduk-pi:latest"
     containerfile = RESOURCES / "Containerfile.pi"
     protocols = frozenset({ANTHROPIC_MESSAGES, OPENAI_CHAT, OPENAI_RESPONSES})
+    # Attributes rather than constants: prime-agent is this CLI in another
+    # build, and the variable names are all that differ.
+    key_env = KEY_ENV
+    base_url_env = "PI_RELAY_BASE_URL"
+    config_env = CONFIG_ENV
+    # Flags that refuse the mounted directory's own configuration. A build
+    # without them passes none: an unknown flag is a run that does not start.
+    trust_flags: tuple[str, ...] = ("--no-approve",)
 
     def check(self, args: argparse.Namespace, provider: Provider) -> None:
         super().check(args, provider)
@@ -151,6 +161,14 @@ class Pi(Agent):
             # The provider block lists the models pi may select, and --model
             # picks one out of it. Neither has anything to hold otherwise.
             raise AgentboxError("--model is required with --agent pi")
+
+    def key_reference(self) -> str:
+        """How the provider block names the variable holding the credential.
+
+        pi interpolates `$NAME`; measured against 0.85.1. The credential itself
+        never goes in the file: it is visible to `inspect` there.
+        """
+        return f"${self.key_env}"
 
     def models(self, args: argparse.Namespace, provider: Provider, base: str) -> str:
         """The models.json the image's entrypoint writes."""
@@ -163,7 +181,7 @@ class Pi(Agent):
                         "api": api(provider),
                         # A reference, so the credential stays in its own
                         # variable rather than inside this blob.
-                        "apiKey": f"${KEY_ENV}",
+                        "apiKey": self.key_reference(),
                         "models": [{"id": args.model}],
                     }
                 }
@@ -181,10 +199,10 @@ class Pi(Agent):
         if api(provider) != APIS[ANTHROPIC_MESSAGES]:
             base += provider.api_prefix
         return Wiring(
-            key_env=args.agent_key_env or KEY_ENV,
-            base_url_env=args.agent_base_url_env or "PI_RELAY_BASE_URL",
+            key_env=args.agent_key_env or self.key_env,
+            base_url_env=args.agent_base_url_env or self.base_url_env,
             base_url=base,
-            env={"SANDUK_PI_MODELS": self.models(args, provider, base)},
+            env={self.config_env: self.models(args, provider, base)},
         )
 
     def argv(
@@ -196,9 +214,9 @@ class Pi(Agent):
             "json",
             # Nothing outlives the container, so a session file is only a write.
             "--no-session",
-            # The bind mount is the user's repository. Its .pi/settings.json
-            # would otherwise steer the run that was asked for here.
-            "--no-approve",
+            # The bind mount is the user's repository; its own config would
+            # otherwise steer the run that was asked for here.
+            *self.trust_flags,
             "--model",
             f"{PROVIDER_ID}/{args.model}",
             # Everything after this is the task, whatever it starts with.

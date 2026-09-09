@@ -4,6 +4,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Nothing
 
 ## [Unreleased]
 
+### Added
+
+- `--mode open|key-safe|sealed`, replacing `--proxy` as the way to say what a run may do. A mode is two properties: whether the host keeps the key, and whether the container has a route off it. `open` is the old default, `sealed` is what `--proxy` was, and `key-safe` is new: the same relay, the same run token, the same path allowlist and model policy, on a network created without `--internal`. It exists for runs that need `npm install` or `git clone` and must not hold the key. It buys no containment and the record stops being complete -- what the agent sends anywhere else never passes the relay -- so the run says so on stderr where the sealed message used to. The fourth combination is not a mode: a key in the container with no route to any provider cannot call anything. `--proxy` is kept, undocumented, as the old spelling of `sealed`, and contradicting it with `--mode` is an error rather than a silent winner. `assistant.toml` takes `mode` in place of `proxy`, still defaulting to sealed, and reads the boolean with a note if it finds one. `destroy` deletes every network a mode creates rather than one mode's: which mode you ran last week is not a question a cleanup verb should ask, and `--proxy-network` now adds a name to that list instead of replacing it.
+
+- `--agent prime`, PrimeIntellect's prime-agent. It is pi's CLI in another build -- the release tarball declares `bin: prime-agent` and depends on the `@earendil-works/pi-*` packages -- so the handler subclasses pi's and inherits the reader, the argv and the protocols. Three differences, each measured against 0.9.4 rather than read: the provider block names the credential's variable bare, where `$NAME` arrived at the upstream as that literal string; there is no `--no-approve`, so the mounted directory's own `.prime/agent/settings.json` is read, which steers a run without widening the box; and its only tool is a Python REPL, so the image bakes the kernel, because without it the agent answers by trying to install `uv` and the proxy network has no route for that. The image installs the release tarball, checksummed against the release manifest, rather than an npm package.
+
+### Fixed
+
+- The relay closes a connection it refuses. The request body is still unread when a 401 or 403 is written, so a client that reused the connection had its body parsed as the next request line, and every request after it answered 400. Found with prime-agent, whose first call was refused for an unrelated reason and whose retries then all failed on a poisoned connection.
+
+- The relay reads a chunked request body. A client that streams its request sends no `Content-Length`, and reading zero bytes there left the body in the socket with the same result as above. Both copies of the relay have it, and the suite runs against both.
+
+### Changed
+
+- The variable carrying an agent's generated config is `SANDUK_MODELS_JSON` rather than `SANDUK_PI_MODELS`: two agents write one now, and the name is sanduk's own, not either agent's.
+
+
 ## [0.2.2]
 
 ### Added

@@ -17,6 +17,7 @@ from sanduk.agents.codex import Codex
 from sanduk.agents.hax import Hax
 from sanduk.agents.opencode import OpenCode
 from sanduk.agents.pi import Pi
+from sanduk.agents.prime import Prime
 from sanduk.errors import AgentboxError
 from sanduk.providers import get_provider
 
@@ -45,7 +46,7 @@ def flags(**kw) -> argparse.Namespace:
 def test_the_shipped_handlers_are_found_without_install_metadata():
     """A source checkout has no entry points; losing claude there would be the
     worst possible failure mode, so the built-ins are seeded directly."""
-    assert set(agent_names()) >= {"claude", "codex", "hax", "opencode", "pi"}
+    assert set(agent_names()) >= {"claude", "codex", "hax", "opencode", "pi", "prime"}
     assert registry()["claude"] is ClaudeCode
 
 
@@ -546,7 +547,7 @@ def test_the_pi_config_travels_in_the_environment():
     """Not a file: models.json under the bind mount would sit in the user's
     repository and be editable by the agent that reads it."""
     wiring = Pi().wire(flags(agent="pi", model="m"), get_provider("openai"), RELAY)
-    config = json.loads(wiring.env["SANDUK_PI_MODELS"])
+    config = json.loads(wiring.env["SANDUK_MODELS_JSON"])
     provider = config["providers"]["sanduk"]
     assert provider["baseUrl"] == "http://10.0.0.1:9/v1"
     assert provider["models"] == [{"id": "m"}]
@@ -554,7 +555,7 @@ def test_the_pi_config_travels_in_the_environment():
 
 def test_the_pi_config_carries_no_credential():
     wiring = Pi().wire(flags(agent="pi", model="m"), get_provider("openai"), RELAY)
-    assert f"${wiring.key_env}" in wiring.env["SANDUK_PI_MODELS"]
+    assert f"${wiring.key_env}" in wiring.env["SANDUK_MODELS_JSON"]
     assert wiring.key_env == "PI_RELAY_KEY"
 
 
@@ -571,7 +572,7 @@ def test_pi_names_the_api_its_provider_speaks(provider, expected):
     """Chat Completions wins where a provider serves it and Responses both: it
     is the route every OpenAI-shaped provider here has."""
     wiring = Pi().wire(flags(agent="pi", model="m"), get_provider(provider), RELAY)
-    config = json.loads(wiring.env["SANDUK_PI_MODELS"])
+    config = json.loads(wiring.env["SANDUK_MODELS_JSON"])
     assert config["providers"]["sanduk"]["api"] == expected
 
 
@@ -579,7 +580,7 @@ def test_pi_gets_the_bare_root_for_anthropic():
     """Measured: pi appends /v1/messages itself, so a base ending in /v1 sent it
     to /v1/v1/messages and the relay refused the path."""
     wiring = Pi().wire(flags(agent="pi", model="m"), get_provider("anthropic"), RELAY)
-    config = json.loads(wiring.env["SANDUK_PI_MODELS"])
+    config = json.loads(wiring.env["SANDUK_MODELS_JSON"])
     assert config["providers"]["sanduk"]["baseUrl"] == RELAY
 
 
@@ -689,3 +690,44 @@ def test_a_pi_retry_that_lands_clears_the_attempt_that_did_not():
         ],
     )
     assert outcome is not None and outcome.ok and outcome.text == "hello"
+
+
+# --- prime ------------------------------------------------------------------
+
+
+def test_prime_is_pi_in_another_build():
+    """The release tarball's bin is prime-agent and its dependencies are the
+    pi packages, so the reader, the argv and the protocols are inherited."""
+    assert issubclass(Prime, Pi)
+    assert Prime.protocols == Pi.protocols
+    assert Prime().reader().__class__ is Pi().reader().__class__
+    assert Prime.image != Pi.image and Prime.containerfile != Pi.containerfile
+
+
+def test_prime_names_the_key_variable_where_pi_dereferences_it():
+    """Measured against 0.9.4 with a stub upstream: `$NAME` arrived as that
+    literal string in the Authorization header, `NAME` arrived as its value."""
+    args, provider = flags(agent="prime", model="m"), get_provider("openai")
+    prime = json.loads(Prime().wire(args, provider, RELAY).env["SANDUK_MODELS_JSON"])
+    assert prime["providers"]["sanduk"]["apiKey"] == "PRIME_RELAY_KEY"
+    pi = json.loads(Pi().wire(args, provider, RELAY).env["SANDUK_MODELS_JSON"])
+    assert pi["providers"]["sanduk"]["apiKey"] == "$PI_RELAY_KEY"
+
+
+def test_the_prime_config_still_carries_no_credential():
+    wiring = Prime().wire(flags(agent="prime", model="m"), get_provider("openai"), RELAY)
+    assert wiring.key_env == "PRIME_RELAY_KEY"
+    assert "PRIME_RELAY_KEY" in wiring.env["SANDUK_MODELS_JSON"]
+    # The name, not a value: the file is visible to `inspect`.
+    assert len(json.loads(wiring.env["SANDUK_MODELS_JSON"])) == 1
+
+
+def test_prime_passes_no_flag_its_build_does_not_have():
+    """0.9.4 has no --no-approve, and an unknown flag is a run that never
+    starts. What it costs is in the handler's docstring."""
+    argv = argv_of(Prime(), flags(agent="prime", model="m"), get_provider("openai"))
+    assert "--no-approve" not in argv
+    assert "--no-approve" in argv_of(
+        Pi(), flags(agent="pi", model="m"), get_provider("openai")
+    )
+    assert argv[argv.index("--model") + 1] == "sanduk/m"
