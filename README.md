@@ -72,7 +72,16 @@ sanduk system status       whether the engine is ready
 sanduk list agents         what each registered handler speaks
 sanduk list providers      the URL an agent must be given, per provider
 sanduk list runtimes       engines, and whether each is installed
+
+sanduk assistant add <dir> register a scheduled assistant
+sanduk tell <name> <text>  queue a message for its next wakeup
+sanduk tick                run every assistant that is due, once
+sanduk serve               tick on a loop, in the foreground
+sanduk outbox              what they have produced
+sanduk runs                wakeup history
 ```
+
+The first group is one container and no memory of it. The second is [Assistants](#assistants): the same run, on a schedule, with state that outlives it.
 
 Every container-engine call sanduk makes goes through `Runtime`, so the Makefile names no engine and `--runtime` selects one for any of these.
 
@@ -148,9 +157,71 @@ pi speaks all three protocols the relay carries, and its provider block names wh
 
 `--log-bodies` records each request body: a digest line per call, full JSON under `--log-dir` (default `./sanduk-logs`, deliberately outside the bind mount so the agent cannot read or edit its own audit trail). Bodies contain the system prompt and every file the agent has read.
 
+`--mount HOST:DEST[:ro]` puts another host directory in the container, beside the one `-w` gives it. Repeatable, read-write unless `:ro`. A destination at or under `/work` is refused: it would shadow part of what `-w` put there, which is a run reading the wrong files rather than one that fails. Read-only is rendered as `--mount type=bind,...,readonly` because `-v host:dest:ro` is Docker's spelling alone.
+
 `--dry-run` prints the `container run` command and exits. `--keep` leaves the container for inspection, and warns that `container inspect` then exposes the token.
 
 A run records the containers it owns, and its own pid, under `$XDG_STATE_HOME/sanduk/runs` (`~/.local/state` by default). Every run first deletes the containers of records whose owner process is gone. SIGKILL cannot be caught, so a killed run cannot delete its own container -- the next run does it, and until then the container is alive holding the run token. SIGTERM and SIGHUP are caught and tear down in place. `--keep` releases the record, so a container you asked to keep is never swept. A state directory that cannot be written stops the run before it starts.
+
+## Assistants
+
+`run` is one container and keeps nothing. An assistant is a directory, a schedule and a mailbox around that same run.
+
+```text
+~/assistants/triage/
+    assistant.toml     what to run, and how often
+    brief.md           the standing instruction
+    workspace/         bind-mounted at /work; where the agent keeps its memory
+    reports/           one task and one report per wakeup
+```
+
+```toml
+# assistant.toml
+agent    = "pi"
+provider = "anthropic"
+model    = "claude-sonnet-5"
+every    = "30m"          # an interval, not a cron expression
+brief    = "brief.md"
+gate     = "gate.sh"      # optional: a non-zero exit skips the wakeup, unpaid
+timeout  = 900
+max_failures = 3
+approval = false          # true: results wait for `sanduk approve` before delivery
+mounts   = ["../repo:/repo:ro"]   # host paths are relative to this file
+args     = []             # extra `sanduk run` flags, verbatim
+```
+
+```text
+sanduk assistant add ~/assistants/triage   register the directory
+sanduk assistant list | show <name>        schedule, failures, queue depth
+sanduk assistant enable | disable <name>   the operator's switch
+sanduk tell <name> 'look at PR 12'         queue a message for the next wakeup
+sanduk tick                                run everything that is due, once
+sanduk serve [--interval 60]               the same, on a loop
+sanduk outbox [--deliver CMD]              read results, or pipe them somewhere
+sanduk outbox --pending                    what is waiting for a decision
+sanduk approve <id> | reject <id>          decide it
+sanduk runs                                wakeup history with exit codes
+```
+
+`tick` is what a scheduler calls:
+
+```text
+*/10 * * * * cd ~/assistants && /opt/homebrew/bin/uv run sanduk tick
+```
+
+`serve` is the same pass on a loop, in the foreground, for when you would rather run one process than a cron entry -- under launchd, systemd, or a terminal. It sleeps until the next assistant is due, capped at `--interval`, and holds no container and no credential in between: it is a timer. SIGINT or SIGTERM stops it after the pass in flight; a signal during a wakeup tears that wakeup down first, and the interrupted wakeup does not count against the assistant's failures.
+
+A wakeup is one `sanduk run`: the brief plus any queued messages become the task, `workspace/` is the bind mount, and the report is copied to `reports/<timestamp>.md`. The container is deleted at the end like any other run, and the relay holds the key for exactly as long as the wakeup lasts.
+
+What outlives a wakeup lives in SQLite at `$XDG_STATE_HOME/sanduk/assistants.db` (`~/.local/state` by default): the schedule, the claim that stops two processes running one assistant, the inbox and the outbox. Messages are consumed only by a wakeup that finished, so a failed one still has them. A failure backs the schedule off, doubling per consecutive failure, and disables the assistant at `max_failures` until you enable it again.
+
+`--deliver` hands each undelivered result to a command on stdin, with `SANDUK_ASSISTANT` and `SANDUK_RUN_ID` in its environment. sanduk ships no platform adapters and holds no messaging credential.
+
+`approval = true` holds every result until a person runs `sanduk approve <id>`; `sanduk reject <id>` keeps it from ever being sent, and neither decision undoes the other. Delivery is the gate because delivery is the only thing that leaves the box: what the agent does, it does inside a container that is deleted at the end of the wakeup.
+
+`mounts` puts other host directories in the container, resolved from the config file's own directory, so an assistant can read a repository it must not write: `mounts = ["../repo:/repo:ro"]`.
+
+Two things to hold onto. `proxy` defaults to true and should stay there: an unattended run is the one nobody is watching. And whatever the agent writes into `workspace/` is read as instruction on the next wakeup, which is memory and also a channel between runs -- keep it somewhere you read the diffs.
 
 ## Layout
 
@@ -161,6 +232,7 @@ src/sanduk/
     providers.py   provider records, wire protocols, route tables
     agent.py       the agent strategy: interface, registry, plugin loading
     runs.py        which process owns which container; the orphan sweep
+    assistants.py  identity, schedule, mailbox: the assistant commands
     agents/        the shipped handlers: claude.py, codex.py, hax.py, opencode.py, pi.py
     proxy.py       the host-side relay
     preflight.py   key validation, macOS firewall check
@@ -173,6 +245,8 @@ src/sanduk/
 ```
 
 Another agent is an `Agent` subclass in any package; see [docs/agents.md](docs/agents.md). A third engine is a `Runtime` subclass and a `RUNTIMES` entry. It must supply four things: the CLI name, the verb that deletes a container (`rm`, not `delete`), how `network inspect` reports the gateway, and whether the host bridge needs a placeholder container to exist at all.
+
+Every container drops all Linux capabilities and runs under an init process. `--runtime docker` adds `--security-opt no-new-privileges` and `--pids-limit 1024`, which Apple's CLI has no flags for and which matter on a shared kernel; there each container is its own VM. The root filesystem stays writable, because every shipped agent writes under `$HOME`.
 
 `--runtime docker` needs a daemon on this kernel, not one in a VM. Docker Desktop, Colima and Lima keep the bridge inside the VM, so the relay cannot bind the gateway; the run stops at the bind with that reason rather than listening somewhere the container cannot reach. `--runtime apple` is the macOS path.
 
@@ -226,6 +300,8 @@ Nothing runs on its own. There is no CI here, and `pyproject.toml` deselects bot
 
 ## Measured on this setup
 
+The per-agent rows are one task and one local model, counted by the relay through `--proxy`. What they compare is each agent's fixed prompt overhead, not the quality of its answer.
+
 | | |
 | --- | --- |
 | Bad key, host preflight | 0.27s |
@@ -235,6 +311,9 @@ Nothing runs on its own. There is no CI here, and `pyproject.toml` deselects bot
 | Claude Code's system prompt and tool schemas | 22,993 tokens |
 | That prefix written cold, as a share of one run | 25% of its cost |
 | The same prefix on a second run inside the cache TTL | read, not written: 23% cheaper |
+| One task, one model, input tokens per run: pi | 4.8-5.1k |
+| The same task: codex | 12.8-20.8k |
+| The same task: opencode | 23.4k |
 | Container direct egress on `sanduk-net` | `000` |
 | Real keys in the container, with all three exported | 0 of 3 |
 | OpenRouter `/api/v1/models`, no credential | `200` |

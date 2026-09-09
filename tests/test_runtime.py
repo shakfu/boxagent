@@ -13,7 +13,7 @@ from sanduk import runtime
 from sanduk.agent import BASE_URL_ENV, KEY_ENV
 from sanduk.cli import build_spec, parse_args, relay_root, select
 from sanduk.errors import AgentboxError
-from sanduk.runtime import ContainerSpec, get_runtime
+from sanduk.runtime import ContainerSpec, Mount, get_runtime
 
 KEY = "sk-ant-api03-SECRET"
 
@@ -198,10 +198,8 @@ def test_an_unreachable_docker_daemon_is_named(monkeypatch):
         get_runtime("docker").require()
 
 
-def test_the_two_engines_render_one_spec_identically():
-    """run_argv is shared. Apple's engine adopted Docker's flag surface, so the
-    day that stops being true, this fails rather than a container run."""
-    spec = ContainerSpec(
+def one_spec() -> ContainerSpec:
+    return ContainerSpec(
         name="sanduk-x",
         image="sanduk:latest",
         command=["-p", "go"],
@@ -209,10 +207,43 @@ def test_the_two_engines_render_one_spec_identically():
         inherit_env=["ANTHROPIC_API_KEY"],
         network="sanduk-net",
     )
-    apple = get_runtime("apple").run_argv(spec)
-    docker = get_runtime("docker").run_argv(spec)
-    assert apple[1:] == docker[1:]
-    assert (apple[0], docker[0]) == ("container", "docker")
+
+
+def without_hardening(engine, argv: list[str]) -> list[str]:
+    """The spec-derived half of an argv. Hardening is per engine by design."""
+    block = list(engine.hardening)
+    start = argv.index(block[0])
+    assert argv[start : start + len(block)] == block
+    return argv[:start] + argv[start + len(block) :]
+
+
+def test_the_two_engines_render_one_spec_identically():
+    """run_argv is shared. Apple's engine adopted Docker's flag surface, so the
+    day that stops being true, this fails rather than a container run. The
+    hardening block is the one deliberate difference."""
+    apple, docker = get_runtime("apple"), get_runtime("docker")
+    a, d = apple.run_argv(one_spec()), docker.run_argv(one_spec())
+    assert without_hardening(apple, a)[1:] == without_hardening(docker, d)[1:]
+    assert (a[0], d[0]) == ("container", "docker")
+
+
+@pytest.mark.parametrize("name", ["apple", "docker"])
+def test_every_container_drops_its_capabilities(name):
+    """The agent runs unprivileged and only reads, writes and forks; --init so
+    a shell it leaves behind is reaped rather than held by pid 1."""
+    argv = get_runtime(name).run_argv(one_spec())
+    assert argv[argv.index("--cap-drop") + 1] == "ALL"
+    assert "--init" in argv
+
+
+def test_only_docker_bounds_pids_and_new_privileges():
+    """A shared kernel is where these matter, and Apple's CLI has neither
+    flag: passing them there would fail the run rather than harden it."""
+    docker = get_runtime("docker").run_argv(one_spec())
+    assert docker[docker.index("--security-opt") + 1] == "no-new-privileges"
+    assert docker[docker.index("--pids-limit") + 1] == "1024"
+    apple = get_runtime("apple").run_argv(one_spec())
+    assert "--pids-limit" not in apple and "--security-opt" not in apple
 
 
 def test_only_docker_explains_a_gateway_that_will_not_bind():
@@ -296,3 +327,22 @@ def test_service_status_answers_rather_than_raising(monkeypatch):
     working one."""
     monkeypatch.setattr(runtime.shutil, "which", lambda _: None)
     assert "not found on PATH" in get_runtime("docker").service_status()
+
+
+def test_a_read_only_mount_is_spelled_the_way_both_engines_read_it():
+    """`-v host:dest:ro` is Docker's alone; --mount readonly is shared. Measured
+    against Apple's engine: a write into it is refused."""
+    spec = one_spec()
+    spec.mounts = [Mount(host=Path("/tmp/repo"), dest="/repo", ro=True)]
+    for name in ("apple", "docker"):
+        argv = get_runtime(name).run_argv(spec)
+        assert argv[argv.index("--mount") + 1] == (
+            "type=bind,source=/tmp/repo,target=/repo,readonly"
+        )
+
+
+def test_a_writable_extra_mount_leaves_readonly_off():
+    spec = one_spec()
+    spec.mounts = [Mount(host=Path("/tmp/repo"), dest="/repo")]
+    argv = get_runtime().run_argv(spec)
+    assert argv[argv.index("--mount") + 1] == "type=bind,source=/tmp/repo,target=/repo"

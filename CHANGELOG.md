@@ -4,6 +4,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Nothing
 
 ## [Unreleased]
 
+## [0.2.2]
+
+### Added
+
+- `run --mount HOST:DEST[:ro]`, repeatable, for a host directory beside the one `-w` gives the agent -- a repository it may read and must not write, say. A destination at or under `/work` is refused rather than layered: it would hide part of what `-w` put there, and a run reading the wrong files fails nothing. Read-only is rendered as `--mount type=bind,source=,target=,readonly`, which both engines read the same way; `-v host:dest:ro` is Docker's alone, and was measured refusing a write under Apple's engine.
+
+- `approval = true` in `assistant.toml`, with `sanduk approve` and `sanduk reject` deciding one outbox entry at a time and `outbox --pending` listing what waits. Delivery is where the gate belongs because delivery is the only thing that leaves the box: what an agent does, it does inside a container that is then deleted. A decision is not undone by the opposite one. Entries written before the columns existed were delivered on sight, so the migration marks them approved rather than holding a backlog nobody asked to review.
+
+- `mounts` in `assistant.toml`, resolved from the config file's own directory, so `../repo:/repo:ro` means beside the config rather than beside whatever directory the scheduler ran from. Validation stays in `run`: one place decides what a mount may be.
+
+- `run --stats-file PATH`, writing the run's outcome as JSON: exit code, ok, the token line, the error, the report path. `main` returns a status and prints the rest, so a caller recording what a run cost had nowhere to read it; `runs` now shows the tokens per wakeup. A database written before the column gains it on open rather than losing its history.
+
+- A weekly CI job that builds all five agent images and asks each what it is. The images are the only thing here that rots without a commit -- four pinned npm versions and a static binary, whose flags and JSON records change under us, which is how codex's doubled trace and pi's message roles were both found. Also on `workflow_dispatch`.
+
+- An integration test for a wakeup: an `assistant.toml` on disk through a real container and the relay to a report, a row and an outbox entry, with only the model stubbed. Every other assistant test replaces the `run` command, which is the seam that test exists to cover.
+
+- Assistants: `assistant add|list|show|enable|disable`, `tell`, `tick`, `serve`, `outbox`, `runs`. An assistant is a directory with an `assistant.toml`, a `workspace/` the agent keeps its memory in, and a `reports/` holding one task and one report per wakeup. A wakeup composes the brief and any queued messages into a task and calls `run`, so an assistant can do nothing a typed `sanduk run` cannot. What has to outlive a run -- the schedule, the claim that stops two processes waking one assistant, the inbox, the outbox -- is SQLite under `$XDG_STATE_HOME/sanduk/assistants.db`; what an operator edits is the TOML file. Schedules are intervals rather than cron expressions: a parser for the second is a dependency this package does not have, and `every = "30m"` is what a wakeup schedule is. `tick` is one pass and cron can call it; `serve` is that pass on a loop in the foreground, sleeping until the next assistant is due and holding no container or credential in between. SIGINT or SIGTERM stops the loop after the pass in flight, and an interrupted wakeup is not counted as a failure: three interrupts should not disable an assistant that works. Wakeups run one at a time, because `run` installs signal handlers and Python allows that only on the main thread, so a wakeup per worker thread would lose the teardown they exist for. A wakeup that fails keeps its messages, doubles its interval per consecutive failure, and disables the assistant at `max_failures`. Delivery is a command the operator names: sanduk ships no platform adapter and holds no messaging credential.
+
+### Changed
+
+- `stop` and `clean` leave alone a container a live run is using, and say which. Both act on the `sanduk-` prefix, which cannot tell a wakeup in flight from a leftover; the run records can, and now do. `clean --all` takes it anyway, for a run whose process is wedged rather than working. Without this a `make clean` in one terminal deletes a scheduled wakeup's container mid-run, which is the failure nobody is present to see.
+
+- Every container drops all Linux capabilities and runs under an init process. The agent runs as the image's unprivileged user and only reads, writes and forks, so nothing it could keep is anything it needs, and a shell it leaves behind is reaped rather than held by pid 1. `--runtime docker` adds `--security-opt no-new-privileges` and `--pids-limit 1024`, which Apple's CLI has no flags for: a shared kernel is where both matter, and there the ceiling is a fork bomb's rather than a workload's. Not `--read-only`: every shipped agent writes under `$HOME`, and the tmpfs that would take its place is a path `Runtime` has no business knowing.
+
 ### Added
 
 - `--agent pi`. pi speaks Anthropic Messages, OpenAI Chat Completions and OpenAI Responses, so it reaches every provider; the provider block names which with an `api` field, preferring Chat Completions where both are served. Its endpoint is neither a variable nor a flag but a `models.json` in its config directory, so the image's entrypoint writes that file from `SANDUK_PI_MODELS` and execs pi -- a config in the bind mount would sit in the user's repository, editable by the agent reading it. `--model` is required, since the provider block lists what pi may select. With `anthropic` the base URL is the bare root: pi appends `/v1/messages` itself, and a base ending in `/v1` reached the relay as `/v1/v1/messages`, which it refused.

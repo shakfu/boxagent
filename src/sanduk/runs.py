@@ -25,14 +25,12 @@ from typing import Any
 
 from sanduk.errors import AgentboxError
 from sanduk.runtime import CONTAINER_PREFIX, Runtime, get_runtime
-from sanduk.util import note
+from sanduk.util import note, state_dir
 
 
 def runs_dir() -> Path:
-    """Where records live: `XDG_STATE_HOME`, or `~/.local/state`."""
-    root = os.environ.get("XDG_STATE_HOME")
-    base = Path(root) if root else Path.home() / ".local" / "state"
-    return base / "sanduk" / "runs"
+    """Where records live, under sanduk's state directory."""
+    return state_dir() / "runs"
 
 
 def owner_alive(pid: int) -> bool:
@@ -105,6 +103,19 @@ def _records() -> list[tuple[Path, dict[str, Any]]]:
             continue
         out.append((path, record))
     return out
+
+
+def live_containers() -> set[str]:
+    """Containers a running process still claims.
+
+    `stop` and `clean` act on a name prefix, which cannot tell a wakeup in
+    flight from a leftover. The records can.
+    """
+    held: set[str] = set()
+    for _path, record in _records():
+        if owner_alive(int(record.get("pid", 0))):
+            held.update(str(c) for c in record.get("containers", []))
+    return held
 
 
 def sweep() -> list[str]:

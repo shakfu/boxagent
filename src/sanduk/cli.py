@@ -14,6 +14,7 @@ output while the container exists.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import secrets
 import shlex
@@ -25,8 +26,10 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 
+from sanduk import assistants
 from sanduk.agent import (
     DEFAULT_AGENT,
     REPORT_INSTRUCTION,
@@ -49,12 +52,14 @@ from sanduk.providers import (
     parse_upstream,
 )
 from sanduk.proxy import ProxyServer, start_proxy
-from sanduk.runs import Run, claim, sweep
+from sanduk.runs import Run, claim, live_containers, sweep
 from sanduk.runtime import (
     CONTAINER_PREFIX,
     DEFAULT_RUNTIME,
     RUNTIMES,
+    Container,
     ContainerSpec,
+    Mount,
     get_runtime,
     wait_for_gateway,
 )
@@ -62,6 +67,14 @@ from sanduk.util import note
 
 COMMANDS = (
     "run",
+    "assistant",
+    "tell",
+    "tick",
+    "serve",
+    "outbox",
+    "approve",
+    "reject",
+    "runs",
     "build",
     "shell",
     "ps",
@@ -71,6 +84,10 @@ COMMANDS = (
     "system",
     "list",
 )
+
+# Where -w lands inside the container. Every other mount is refused this path
+# and anything under it.
+WORKDIR_DEST = "/work"
 
 RUN_EPILOG = (
     "The API key comes from the provider's environment variable only.\n"
@@ -119,6 +136,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     sub = root.add_subparsers(dest="command", metavar="<command>", required=True)
     _add_engine_commands(sub)
+    _add_assistant_commands(sub)
     _add_list(sub)
 
     p = sub.add_parser(
@@ -140,6 +158,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "-o", "--report", type=Path, help="copy the agent's REPORT.md here after the run"
+    )
+    p.add_argument(
+        "--mount",
+        action="append",
+        default=[],
+        metavar="HOST:DEST[:ro]",
+        help="another host directory in the container, e.g. ../repo:/repo:ro. "
+        "Repeatable. Read-write unless :ro",
+    )
+    p.add_argument(
+        "--stats-file",
+        type=Path,
+        help="write the run's outcome here as JSON: exit, ok, stats, error, report",
     )
     g = p.add_argument_group("image")
     g.add_argument(
@@ -325,9 +356,17 @@ def _add_engine_commands(
     for verb, helptext in (
         ("ps", f"list {CONTAINER_PREFIX}* containers"),
         ("stop", "stop running sanduk containers, leaving them on disk"),
-        ("clean", "stop and delete sanduk containers"),
     ):
         sub.add_parser(verb, parents=[engine], help=helptext)
+
+    p = sub.add_parser(
+        "clean", parents=[engine], help="stop and delete sanduk containers"
+    )
+    p.add_argument(
+        "--all",
+        action="store_true",
+        help="include a container a live run is using (a wedged run, say)",
+    )
 
     p = sub.add_parser(
         "destroy", parents=[engine], help="clean, plus the image and the network"
@@ -339,12 +378,80 @@ def _add_engine_commands(
         default="sanduk-net",
         help="network to delete (default: sanduk-net)",
     )
-    p.set_defaults(containerfile=None)
+    p.set_defaults(containerfile=None, all=False)
 
     p = sub.add_parser(
         "system", parents=[engine], help="show or change the engine's own service"
     )
     p.add_argument("action", choices=["status", "start", "stop"])
+
+
+def _add_assistant_commands(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    """Scheduled runs. Identity is a file, state is SQLite, and a wakeup is one
+    `run` -- so nothing here takes engine flags except the one that starts a
+    container."""
+    p = sub.add_parser("assistant", help="register and inspect assistants")
+    action = p.add_subparsers(dest="action", metavar="<action>", required=True)
+    add = action.add_parser(
+        "add", help=f"register a directory holding {assistants.CONFIG_NAME}"
+    )
+    add.add_argument("dir", type=Path)
+    action.add_parser("list", help="one row per registered assistant")
+    for verb, helptext in (
+        ("show", "one assistant's state, as JSON"),
+        ("enable", "let it run again, and clear its failure count"),
+        ("disable", "stop scheduling it"),
+    ):
+        q = action.add_parser(verb, help=helptext)
+        q.add_argument("name")
+
+    p = sub.add_parser("tell", help="queue a message for the next wakeup")
+    p.add_argument("name")
+    p.add_argument("message", nargs="+", help="the message text")
+
+    p = sub.add_parser("tick", help="run every assistant that is due, once")
+    p.add_argument("--name", help="this one only, whether or not it is due")
+    p.add_argument(
+        "--runtime",
+        choices=sorted(RUNTIMES),
+        help="override the engine named in assistant.toml",
+    )
+
+    p = sub.add_parser("serve", help="tick on a loop, in the foreground")
+    p.add_argument(
+        "--interval",
+        type=int,
+        default=60,
+        help="seconds between passes at most (default: 60)",
+    )
+    p.add_argument("--runtime", choices=sorted(RUNTIMES))
+
+    p = sub.add_parser("outbox", help="what assistants have produced")
+    p.add_argument("--name")
+    p.add_argument(
+        "--undelivered", action="store_true", help="only what --deliver has not sent"
+    )
+    p.add_argument(
+        "--pending", action="store_true", help="only what is waiting for approval"
+    )
+    p.add_argument(
+        "--deliver",
+        metavar="CMD",
+        help="pipe each undelivered entry to CMD on stdin, then mark it delivered",
+    )
+
+    for verb, helptext in (
+        ("approve", "let outbox entries be delivered"),
+        ("reject", "keep outbox entries from ever being delivered"),
+    ):
+        q = sub.add_parser(verb, help=helptext)
+        q.add_argument("id", nargs="+", type=int, help="outbox entry ids")
+
+    p = sub.add_parser("runs", help="wakeup history")
+    p.add_argument("--name")
+    p.add_argument("--limit", type=int, default=20)
 
 
 def _add_list(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -388,28 +495,44 @@ def ps(args: argparse.Namespace) -> int:
     return 0
 
 
+def _unowned(containers: list[Container]) -> list[Container]:
+    """Those no live run claims. A wakeup on a schedule is nobody's to stop."""
+    held = live_containers()
+    keep = [c for c in containers if c.name in held]
+    if keep:
+        names = ", ".join(sorted(c.name for c in keep))
+        note(f"leaving {len(keep)} to their running owner: {names}")
+    return [c for c in containers if c.name not in held]
+
+
 def stop(args: argparse.Namespace) -> int:
     runtime = get_runtime(args.runtime)
     runtime.require()
     running = [
         c for c in runtime.list_containers(CONTAINER_PREFIX) if c.state == "running"
     ]
-    for c in running:
+    stoppable = _unowned(running)
+    for c in stoppable:
         runtime.stop(c.name)
         note(f"stopped {c.name}")
-    if not running:
-        note("no running sanduk containers")
+    if not stoppable:
+        note("no running sanduk containers to stop")
     return 0
 
 
 def clean(args: argparse.Namespace) -> int:
-    """Delete every container sanduk named. Nothing else carries the prefix."""
+    """Delete every container sanduk named, except one a live run is using.
+
+    Nothing else carries the prefix, and `--all` overrides the exception for a
+    run whose process is wedged rather than working.
+    """
     runtime = get_runtime(args.runtime)
     runtime.require()
     found = runtime.list_containers(CONTAINER_PREFIX)
-    for c in found:
+    deletable = found if getattr(args, "all", False) else _unowned(found)
+    for c in deletable:
         runtime.destroy(c.name)
-    if not found:
+    if not deletable:
         note("no sanduk containers to delete")
     return 0
 
@@ -523,6 +646,43 @@ def container_env_names(args: argparse.Namespace, provider: Provider) -> tuple[s
     return wiring.key_env, wiring.base_url_env
 
 
+def parse_mounts(values: list[str]) -> list[Mount]:
+    """`HOST:DEST[:ro]` per `--mount`.
+
+    Refused: a host directory that is not there, a destination that is not
+    absolute, and anything at or under the working directory. The last would
+    shadow part of what the agent was pointed at, which is a run reading the
+    wrong files rather than one that fails.
+    """
+    mounts: list[Mount] = []
+    claimed: dict[str, Path] = {}
+    for value in values:
+        parts = value.split(":")
+        if len(parts) not in (2, 3) or not parts[0] or not parts[1]:
+            raise AgentboxError(f"--mount {value!r}: expected HOST:DEST[:ro]")
+        mode = parts[2] if len(parts) == 3 else "rw"
+        if mode not in ("ro", "rw"):
+            raise AgentboxError(f"--mount {value!r}: mode is ro or rw, not {mode!r}")
+        host = Path(parts[0]).expanduser().resolve()
+        dest = parts[1]
+        if not host.is_dir():
+            raise AgentboxError(f"--mount {value!r}: {host} is not a directory")
+        if not dest.startswith("/") or dest == "/":
+            raise AgentboxError(f"--mount {value!r}: {dest} is not an absolute path")
+        if dest == WORKDIR_DEST or dest.startswith(WORKDIR_DEST + "/"):
+            raise AgentboxError(
+                f"--mount {value!r}: {WORKDIR_DEST} is where -w lands; a mount "
+                f"there would shadow the directory the agent was given"
+            )
+        if dest in claimed:
+            raise AgentboxError(
+                f"--mount {value!r}: {dest} already holds {claimed[dest]}"
+            )
+        claimed[dest] = host
+        mounts.append(Mount(host=host, dest=dest, ro=mode == "ro"))
+    return mounts
+
+
 def build_spec(
     args: argparse.Namespace,
     sel: Selection,
@@ -545,7 +705,8 @@ def build_spec(
         command=sel.agent.argv(args, sel.provider, task, wiring),
         cpus=args.cpus,
         memory=args.memory,
-        mount=(workdir, "/work"),
+        mount=(workdir, WORKDIR_DEST),
+        mounts=parse_mounts(getattr(args, "mount", [])),
         inherit_env=inherit,
         # The agent's own settings first, so an explicit -e can override one.
         env=[f"{k}={v}" for k, v in wiring.env.items()] + list(args.env),
@@ -562,6 +723,9 @@ def read_task(args: argparse.Namespace) -> str:
     if not args.no_report_instruction:
         task += REPORT_INSTRUCTION.format(report=REPORT_NAME)
     return task
+
+
+TEARDOWN_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
 
 
 def _exit_on_signal(signum: int, _frame: object) -> None:
@@ -661,8 +825,9 @@ def run(args: argparse.Namespace) -> int:
     started = time.monotonic()
     # SIGTERM and SIGHUP kill this process with no teardown otherwise, which is
     # the same leak SIGKILL causes and the only one that can be closed here.
-    for signum in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(signum, _exit_on_signal)
+    # Restored in the finally below: `serve` calls this in a loop and its own
+    # handlers have to survive a wakeup.
+    handlers = [(s, signal.signal(s, _exit_on_signal)) for s in TEARDOWN_SIGNALS]
     try:
         outcome, rc = launch(sel.agent, cmd, args.timeout, args.quiet, env=child_env)
     except (KeyboardInterrupt, SystemExit) as e:
@@ -686,6 +851,8 @@ def run(args: argparse.Namespace) -> int:
             runtime.destroy(holder)
         if record:
             record.release()
+        for signum, handler in handlers:
+            signal.signal(signum, handler)
 
     note(f"{time.monotonic() - started:.1f}s wall")
     if outcome:
@@ -732,6 +899,21 @@ def _collect_report(
     rc: int,
 ) -> int:
     report = workdir / REPORT_NAME
+    if args.stats_file:
+        # The exit code is all a caller gets from `main`, and the token line is
+        # printed rather than returned. An assistant recording what a wakeup
+        # cost needs it as data.
+        args.stats_file.write_text(
+            json.dumps(
+                {
+                    "exit": rc,
+                    "ok": bool(outcome and outcome.ok),
+                    "stats": outcome.stats if outcome else "",
+                    "error": outcome.error if outcome else "",
+                    "report": str(args.report or report) if report.is_file() else None,
+                }
+            )
+        )
     if report.is_file():
         if args.report:
             shutil.copy(report, args.report)
@@ -745,8 +927,99 @@ def _collect_report(
     return 0 if rc == 0 else rc
 
 
+def assistant(args: argparse.Namespace) -> int:
+    db = assistants.connect()
+    if args.action == "add":
+        added = assistants.load(args.dir)
+        assistants.register(db, added)
+        note(f"registered {added.name} -> {added.dir}")
+    elif args.action == "list":
+        registered = assistants.rows(db)
+        for r in registered:
+            left = r["next_due_at"] - assistants.now()
+            when = "disabled" if r["disabled"] else ("due" if left <= 0 else f"{left}s")
+            print(f"{r['name']:16}  {when:10}  {r['dir']}")
+        if not registered:
+            note("no assistants registered (`sanduk assistant add <dir>`)")
+    elif args.action == "show":
+        print(assistants.summary(db, args.name))
+    else:
+        disabled = args.action == "disable"
+        assistants.set_disabled(db, args.name, disabled)
+        note(f"{args.name} is {'disabled' if disabled else 'enabled'}")
+    return 0
+
+
+def tell(args: argparse.Namespace) -> int:
+    db = assistants.connect()
+    assistants.tell(db, args.name, " ".join(args.message))
+    note(f"queued for {args.name}; it arrives on the next wakeup")
+    return 0
+
+
+def tick(args: argparse.Namespace) -> int:
+    return assistants.tick(db=assistants.connect(), name=args.name, runtime=args.runtime)
+
+
+def serve(args: argparse.Namespace) -> int:
+    return assistants.serve(
+        assistants.connect(), interval=args.interval, runtime=args.runtime
+    )
+
+
+def outbox(args: argparse.Namespace) -> int:
+    db = assistants.connect()
+    if args.deliver:
+        sent = assistants.deliver(db, args.deliver, args.name)
+        note(f"delivered {sent}")
+        return 0
+    entries = assistants.outbox(
+        db, args.name, undelivered=args.undelivered, pending=args.pending
+    )
+    for entry in entries:
+        when = datetime.fromtimestamp(entry["created_at"], UTC).isoformat()
+        state = assistants.state_of(entry)
+        print(f"--- [{entry['id']}] {entry['name']} run {entry['run_id']} {when} {state}")
+        print(entry["body"].rstrip())
+    if not entries:
+        note("nothing in the outbox")
+    return 0
+
+
+def decide(args: argparse.Namespace) -> int:
+    """approve and reject: one verb, two words for the same record."""
+    approve = args.command == "approve"
+    changed = assistants.decide(assistants.connect(), args.id, approve)
+    note(f"{changed} {'approved' if approve else 'rejected'}")
+    if changed < len(args.id):
+        note("the rest were decided or delivered already")
+    return 0
+
+
+def runs(args: argparse.Namespace) -> int:
+    db = assistants.connect()
+    found = assistants.history(db, args.name, args.limit)
+    for r in found:
+        when = datetime.fromtimestamp(r["started_at"], UTC).isoformat()
+        took = f"{r['ended_at'] - r['started_at']}s" if r["ended_at"] else "running"
+        code = "-" if r["exit_code"] is None else str(r["exit_code"])
+        cost = f"  {r['stats']}" if r["stats"] else ""
+        print(f"{r['id']:5}  {r['name']:16}  {when}  {took:>8}  exit {code}{cost}")
+    if not found:
+        note("no wakeups recorded")
+    return 0
+
+
 COMMAND_FUNCS: dict[str, Callable[[argparse.Namespace], int]] = {
     "run": run,
+    "assistant": assistant,
+    "tell": tell,
+    "tick": tick,
+    "serve": serve,
+    "outbox": outbox,
+    "approve": decide,
+    "reject": decide,
+    "runs": runs,
     "build": build,
     "shell": shell,
     "ps": ps,

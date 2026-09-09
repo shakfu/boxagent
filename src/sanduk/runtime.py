@@ -42,6 +42,23 @@ class Container:
     state: str
 
 
+@dataclass(frozen=True)
+class Mount:
+    """One host directory inside the container, beside the working directory.
+
+    Rendered with `--mount` rather than `-v`: both engines spell the read-only
+    flag the same way there, where `-v host:dest:ro` is Docker's alone.
+    """
+
+    host: Path
+    dest: str
+    ro: bool = False
+
+    def argv(self) -> list[str]:
+        spec = f"type=bind,source={self.host},target={self.dest}"
+        return ["--mount", (spec + ",readonly") if self.ro else spec]
+
+
 @dataclass
 class ContainerSpec:
     """One container to run. Engine-neutral; `Runtime.run_argv` renders it."""
@@ -52,6 +69,7 @@ class ContainerSpec:
     cpus: int = 4
     memory: str = "4G"
     mount: tuple[Path, str] | None = None  # (host dir, path inside)
+    mounts: list[Mount] = field(default_factory=list)  # everything else
     inherit_env: list[str] = field(default_factory=list)  # -e NAME: value from us
     env: list[str] = field(default_factory=list)  # -e K=V
     network: str | None = None
@@ -73,6 +91,13 @@ class Runtime:
     # likely reason. --proxy is the whole point of sanduk, so a failure there
     # has to say what to do about it.
     gateway_hint = ""
+    # Flags every container gets on top of its spec. The agent runs as the
+    # image's unprivileged user and only reads, writes and forks, so no
+    # capability it could keep is one it needs. Not --read-only: every shipped
+    # agent writes under $HOME, and a tmpfs per agent would be a path this
+    # class has no business knowing. Per engine, because Apple's CLI has
+    # neither --pids-limit nor --security-opt.
+    hardening: tuple[str, ...] = ("--cap-drop", "ALL", "--init")
 
     # --- preflight ----------------------------------------------------------
 
@@ -196,12 +221,15 @@ class Runtime:
             str(spec.cpus),
             "--memory",
             spec.memory,
+            *self.hardening,
         ]
         if spec.detach:
             argv.append("-d")
         if spec.mount:
             host, dest = spec.mount
             argv += ["-v", f"{host}:{dest}", "-w", dest]
+        for mount in spec.mounts:
+            argv += mount.argv()
         # Bare -e NAME: the engine inherits the value from this process, so the
         # value stays out of the argv and out of the host's process list.
         for key in spec.inherit_env:
@@ -310,6 +338,17 @@ class Docker(Runtime):
 
     name = "docker"
     cli = "docker"
+    # A shared kernel, unlike Apple's VM per container, so the two flags that
+    # engine does not have are the two that matter most here. The pid ceiling
+    # is a fork bomb's, not a workload's: node plus a shell plus ripgrep is two
+    # orders of magnitude below it.
+    hardening = (
+        *Runtime.hardening,
+        "--security-opt",
+        "no-new-privileges",
+        "--pids-limit",
+        "1024",
+    )
     delete_verb = "rm"
     install_hint = "Install from docs.docker.com/get-docker/."
     needs_network_holder = False

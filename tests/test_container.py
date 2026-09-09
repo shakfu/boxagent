@@ -14,12 +14,15 @@ import json
 import os
 import re
 import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from sanduk import proxy
+from sanduk import assistants, proxy
 from sanduk.agent import get_agent
 from sanduk.errors import AgentboxError
+from sanduk.providers import OPENAI_CHAT
 from sanduk.runtime import get_runtime, wait_for_gateway
 
 pytestmark = pytest.mark.container
@@ -165,3 +168,131 @@ def test_no_sanduk_containers_are_left_behind():
         c.name for c in ENGINE.list_containers("sanduk-") if "hold" not in c.name
     ]
     assert leftovers == [], f"orphans: {leftovers}"
+
+
+# --- a wakeup, end to end ---------------------------------------------------
+
+
+REPLY = "Wrote the report."
+
+
+class ChatStub(BaseHTTPRequestHandler):
+    """An OpenAI Chat Completions endpoint that answers once, and counts.
+
+    The agent's own model is not what is under test here. What is: an
+    `assistant.toml` on disk becoming a container, a relayed request, a report,
+    and a row in the database.
+    """
+
+    protocol_version = "HTTP/1.1"
+    calls = 0
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        self._send(json.dumps({"data": [{"id": "stub-model"}]}).encode())
+
+    def do_POST(self):
+        raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        ChatStub.calls += 1
+        streaming = b'"stream": true' in raw or b'"stream":true' in raw
+        message = {"role": "assistant", "content": REPLY}
+        usage = {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14}
+        if not streaming:
+            self._send(
+                json.dumps(
+                    {
+                        "id": "stub",
+                        "object": "chat.completion",
+                        "model": "stub-model",
+                        "choices": [
+                            {"index": 0, "message": message, "finish_reason": "stop"}
+                        ],
+                        "usage": usage,
+                    }
+                ).encode()
+            )
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        chunks = [
+            {"choices": [{"index": 0, "delta": {"content": REPLY}}]},
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+            {"choices": [], "usage": usage},
+        ]
+        for chunk in chunks:
+            self._chunk(f"data: {json.dumps(chunk)}\n\n".encode())
+        self._chunk(b"data: [DONE]\n\n")
+        self._chunk(b"")
+
+    def _chunk(self, payload):
+        self.wfile.write(b"%x\r\n" % len(payload) + payload + b"\r\n")
+        self.wfile.flush()
+
+    def _send(self, body):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+@pytest.fixture
+def chat_stub():
+    ChatStub.calls = 0
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), ChatStub)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield srv.server_address[1]
+    srv.shutdown()
+
+
+@pytest.fixture
+def assistant_home(tmp_path, monkeypatch, chat_stub):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    home = tmp_path / "triage"
+    home.mkdir()
+    (home / "brief.md").write_text("Say hello. Write one line to REPORT.md.")
+    (home / "assistant.toml").write_text(
+        f"""
+name = "triage"
+agent = "{AGENT.name}"
+provider = "openai-compat"
+model = "stub-model"
+runtime = "{ENGINE.name}"
+every = "1h"
+timeout = 120
+brief = "brief.md"
+args = ["--upstream", "http://127.0.0.1:{chat_stub}", "--skip-key-check"]
+"""
+    )
+    return home
+
+
+def test_a_wakeup_is_a_container_a_relayed_call_and_a_row(assistant_home):
+    """The whole assistant path, with nothing stubbed but the model: config on
+    disk -> container -> relay -> report -> database."""
+    if OPENAI_CHAT not in AGENT.protocols:
+        pytest.skip(f"{AGENT.name} does not speak Chat Completions; the stub only does")
+    db = assistants.connect()
+    assistants.register(db, assistants.load(assistant_home))
+    assistants.tell(db, "triage", "this message rides the wakeup")
+
+    assistants.tick(db)
+
+    recorded = list(db.execute("SELECT * FROM runs"))
+    assert len(recorded) == 1, recorded
+    assert ChatStub.calls >= 1, "the container never reached the relay"
+    assert recorded[0]["exit_code"] == 0
+    assert recorded[0]["stats"], "the wakeup recorded no token line"
+    # The message was answered, so it is consumed; the outbox has the result.
+    assert assistants.pending(db, "triage") == []
+    assert len(assistants.outbox(db, "triage")) == 1
+    # Scheduled an hour out, and the wakeup's own containers are gone. The
+    # holder another test in this module is standing up does not count.
+    assert assistants.row(db, "triage")["next_due_at"] > assistants.now() + 3000
+    left = [c.name for c in ENGINE.list_containers("sanduk-") if "hold" not in c.name]
+    assert left == []

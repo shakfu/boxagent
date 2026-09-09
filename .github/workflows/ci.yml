@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The agent images are the only thing here that rots without a commit: four
+  # pinned npm versions and a static binary, whose flags and JSON records
+  # change under us. Weekly, and on demand.
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
 
 jobs:
   # Lint, format and types are platform-independent, so they run once rather
@@ -65,3 +71,29 @@ jobs:
       - name: Tear down
         if: always()
         run: docker network rm sanduk-ci || true
+
+  # Every shipped image, built and asked what it is. A handler is written
+  # against one CLI's flags and one JSON stream; an upstream release that
+  # changes either breaks a run and nothing else here would notice.
+  images:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        agent: [claude, codex, hax, opencode, pi]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+
+      - name: Build the image
+        run: make image AGENT=${{ matrix.agent }} RUNTIME=docker
+
+      - name: The image runs its agent
+        env:
+          RUNTIME: docker
+          AGENT: ${{ matrix.agent }}
+        run: uv run pytest -q -m container -k runs_its_agent

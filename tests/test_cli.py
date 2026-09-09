@@ -4,11 +4,14 @@
 Every run here is a --dry-run: nothing is built and nothing is started.
 """
 
+import argparse
+import json
+
 import pytest
 
-from sanduk.agent import KEY_ENV, REPORT_NAME
+from sanduk.agent import KEY_ENV, REPORT_NAME, Outcome
 from sanduk.agents.claude import ClaudeCode
-from sanduk.cli import main, parse_args
+from sanduk.cli import _collect_report, main, parse_args, parse_mounts
 from sanduk.errors import AgentboxError
 from sanduk.runtime import Container
 
@@ -442,3 +445,177 @@ def test_system_status_reports_without_requiring_a_running_engine(engine, capsys
 def test_system_passes_start_and_stop_through(engine, action):
     assert main(["system", action]) == 0
     assert engine.service == [action]
+
+
+# --- ownership and the assistant commands -----------------------------------
+
+
+@pytest.fixture
+def owned(monkeypatch):
+    """One container a live run claims; the rest are nobody's."""
+    monkeypatch.setattr("sanduk.cli.live_containers", lambda: {"sanduk-live"})
+
+
+def test_clean_leaves_a_container_a_live_run_is_using(engine, owned, capsys):
+    """A wakeup on a schedule is running while someone types `make clean`."""
+    engine.containers = running("sanduk-live", "sanduk-old")
+    assert main(["clean"]) == 0
+    assert engine.destroyed == ["sanduk-old"]
+    assert "sanduk-live" in capsys.readouterr().err
+
+
+def test_clean_all_deletes_it_anyway(engine, owned):
+    """For a run whose process is wedged rather than working."""
+    engine.containers = running("sanduk-live", "sanduk-old")
+    assert main(["clean", "--all"]) == 0
+    assert engine.destroyed == ["sanduk-live", "sanduk-old"]
+
+
+def test_stop_leaves_a_container_a_live_run_is_using(engine, owned):
+    engine.containers = running("sanduk-live", "sanduk-old")
+    assert main(["stop"]) == 0
+    assert engine.stopped == ["sanduk-old"]
+
+
+@pytest.fixture
+def assistant_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    d = tmp_path / "triage"
+    d.mkdir()
+    (d / "assistant.toml").write_text('agent = "pi"\nmodel = "m"\nbrief = "b.md"\n')
+    (d / "b.md").write_text("Triage.")
+    return d
+
+
+def test_an_assistant_is_registered_by_its_directory(assistant_dir, capsys):
+    assert main(["assistant", "add", str(assistant_dir)]) == 0
+    assert main(["assistant", "list"]) == 0
+    assert "triage" in capsys.readouterr().out
+
+
+def test_a_message_is_queued_for_the_next_wakeup(assistant_dir, capsys):
+    main(["assistant", "add", str(assistant_dir)])
+    assert main(["tell", "triage", "look", "at", "PR", "12"]) == 0
+    assert main(["assistant", "show", "triage"]) == 0
+    assert '"pending": 1' in capsys.readouterr().out
+
+
+def test_telling_an_unknown_assistant_is_an_error(assistant_dir):
+    assert main(["tell", "nope", "hello"]) == 2
+
+
+def test_an_empty_outbox_and_history_are_not_errors(assistant_dir, capsys):
+    main(["assistant", "add", str(assistant_dir)])
+    assert main(["outbox"]) == 0
+    assert main(["runs"]) == 0
+    err = capsys.readouterr().err
+    assert "nothing in the outbox" in err and "no wakeups recorded" in err
+
+
+def test_the_stats_file_records_what_a_run_cost(tmp_path):
+    """The exit code is all `main` returns and the token line is printed, so a
+    caller recording what a wakeup cost has nowhere else to read it."""
+    stats = tmp_path / "stats.json"
+    (tmp_path / REPORT_NAME).write_text("done")
+    args = argparse.Namespace(report=None, stats_file=stats)
+    outcome = Outcome(ok=True, text="", error="", stats="10 in / 2 out")
+    assert _collect_report(args, tmp_path, outcome, 0) == 0
+    found = json.loads(stats.read_text())
+    assert found["stats"] == "10 in / 2 out"
+    assert found["ok"] is True and found["exit"] == 0
+    assert found["report"] == str(tmp_path / REPORT_NAME)
+
+
+def test_the_stats_file_of_a_run_that_reported_nothing(tmp_path):
+    stats = tmp_path / "stats.json"
+    args = argparse.Namespace(report=None, stats_file=stats)
+    assert _collect_report(args, tmp_path, None, 124) == 124
+    found = json.loads(stats.read_text())
+    assert found == {
+        "exit": 124,
+        "ok": False,
+        "stats": "",
+        "error": "",
+        "report": None,
+    }
+
+
+# --- extra mounts -----------------------------------------------------------
+
+
+def test_a_mount_is_read_write_unless_it_says_otherwise(tmp_path):
+    mounts = parse_mounts([f"{tmp_path}:/repo", f"{tmp_path}:/notes:ro"])
+    assert [(m.dest, m.ro) for m in mounts] == [("/repo", False), ("/notes", True)]
+    assert mounts[0].host == tmp_path
+
+
+def test_a_relative_host_path_is_resolved(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "repo").mkdir()
+    assert parse_mounts(["repo:/repo"])[0].host == tmp_path / "repo"
+
+
+@pytest.mark.parametrize(
+    ("spec", "why"),
+    [
+        ("/tmp", "HOST:DEST"),
+        ("/tmp:/a:rx", "mode is ro or rw"),
+        ("/tmp:/a:ro:extra", "HOST:DEST"),
+        (":/a", "HOST:DEST"),
+        ("/nowhere-at-all:/a", "not a directory"),
+        ("/tmp:relative", "not an absolute path"),
+        ("/tmp:/", "not an absolute path"),
+    ],
+)
+def test_a_mount_that_cannot_be_meant_is_refused(spec, why):
+    with pytest.raises(AgentboxError, match=why):
+        parse_mounts([spec])
+
+
+@pytest.mark.parametrize("dest", ["/work", "/work/sub"])
+def test_a_mount_may_not_shadow_the_working_directory(tmp_path, dest):
+    """It would hide part of what -w put there: a run reading the wrong files
+    rather than one that fails."""
+    with pytest.raises(AgentboxError, match="where -w lands"):
+        parse_mounts([f"{tmp_path}:{dest}"])
+
+
+def test_one_destination_holds_one_directory(tmp_path):
+    with pytest.raises(AgentboxError, match="already holds"):
+        parse_mounts([f"{tmp_path}:/a", f"{tmp_path}:/a"])
+
+
+def test_an_extra_mount_reaches_the_container_argv(tmp_path, capsys):
+    assert main(["run", "task", "-w", str(tmp_path), "--mount", f"{tmp_path}:/repo:ro",
+                 "--dry-run"]) == 0  # fmt: skip
+    rendered = capsys.readouterr().out
+    assert f"type=bind,source={tmp_path},target=/repo,readonly" in rendered
+
+
+def test_approve_and_reject_name_what_they_changed(assistant_dir, capsys):
+    """Ids come from the outbox listing, so both verbs take numbers."""
+    main(["assistant", "add", str(assistant_dir)])
+    db = __import__("sanduk.assistants", fromlist=["x"]).connect()
+    db.execute(
+        "INSERT INTO outbox (name, run_id, created_at, body) VALUES "
+        "('triage', 1, 1, 'first'), ('triage', 1, 2, 'second')"
+    )
+    db.execute("UPDATE outbox SET approved_at = NULL")
+    assert main(["approve", "1"]) == 0
+    assert main(["reject", "2"]) == 0
+    assert main(["outbox"]) == 0
+    printed = capsys.readouterr().out
+    assert "[1] triage run 1" in printed and "approved" in printed
+    assert "rejected" in printed
+    assert main(["outbox", "--pending"]) == 0
+
+
+def test_approving_something_already_decided_says_so(assistant_dir, capsys):
+    main(["assistant", "add", str(assistant_dir)])
+    db = __import__("sanduk.assistants", fromlist=["x"]).connect()
+    db.execute(
+        "INSERT INTO outbox (name, run_id, created_at, body, approved_at) VALUES "
+        "('triage', 1, 1, 'first', 5)"
+    )
+    assert main(["approve", "1"]) == 0
+    assert "already" in capsys.readouterr().err
