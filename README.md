@@ -4,7 +4,7 @@
 
 sanduk is a Python CLI tool and package that makes it easy to run an agent inside a disposable container. The agent does its work, writes a report to a bind-mounted directory, and when it’s finished, the container is deleted.
 
-Six agents ship: Claude Code, [codex](https://github.com/openai/codex), [hax](https://github.com/OleksandrChekhovskyi/hax), [opencode](https://github.com/sst/opencode), [pi](https://github.com/earendil-works/pi), and [prime-agent](https://github.com/PrimeIntellect-ai/prime-agent). Two container engines: Apple's [`container`](https://github.com/apple/container) on macOS, and `docker`. Each sits behind a registry -- an agent behind `sanduk.agent.Agent`, an engine behind `sanduk.runtime.Runtime` -- so another of either is one class. An agent can live in your own package and be found by entry point; see [docs/agents.md](docs/agents.md). Podman is not implemented.
+Seven agents ship: Claude Code, [codex](https://github.com/openai/codex), [hax](https://github.com/OleksandrChekhovskyi/hax), [hermes](https://github.com/NousResearch/hermes-agent), [opencode](https://github.com/sst/opencode), [pi](https://github.com/earendil-works/pi), and [prime-agent](https://github.com/PrimeIntellect-ai/prime-agent). Two container engines: Apple's [`container`](https://github.com/apple/container) on macOS, and `docker`. Each sits behind a registry -- an agent behind `sanduk.agent.Agent`, an engine behind `sanduk.runtime.Runtime` -- so another of either is one class. An agent can live in your own package and be found by entry point; see [docs/agents.md](docs/agents.md). Podman is not implemented.
 
 Four providers are supported: Anthropic, OpenAI, OpenRouter, and any OpenAI-compatible server, which includes a local `llama-server`. See [Providers](#providers).
 
@@ -24,7 +24,7 @@ In its stronger mode the container has no route off the host and never holds the
 
 Apple's `container` runs **Linux** containers as lightweight VMs. There is no such thing as a macOS container here; anything needing Xcode or the macOS toolchain cannot be the workload.
 
-Each agent has its own image. Claude Code, codex, opencode and pi run on `node:22-slim`; hax's is `debian:trixie-slim` with no language runtime, since the binary is static. All add `git`, `ripgrep`, `curl`, `jq`, and `python3`. The agent can only run what is in it. Without an interpreter it falls back to hand-tracing and still writes a confident report, so check whether the findings say they were reproduced. There is no C, Go, or Rust toolchain: point `--image` at your own, or `--containerfile` at one to build.
+Each agent has its own image. Claude Code, codex, opencode, pi and prime-agent run on `node:22-slim`; hermes is a Python package, so its image is `python:3.12-slim`; hax's is `debian:trixie-slim` with no language runtime, since the binary is static. All add `git`, `ripgrep`, `curl`, `jq`, and `python3`. The agent can only run what is in it. Without an interpreter it falls back to hand-tracing and still writes a confident report, so check whether the findings say they were reproduced. There is no C, Go, or Rust toolchain: point `--image` at your own, or `--containerfile` at one to build.
 
 ## Install
 
@@ -140,12 +140,13 @@ The relay only forwards. It does not translate between protocols, so the agent h
 --agent claude     Claude Code   anthropic
 --agent codex      codex         openai, openai-compat
 --agent hax        hax           every provider
+--agent hermes     hermes-agent  openai-chat providers, --mode open only
 --agent opencode   opencode      every provider
 --agent pi         pi            every provider
 --agent prime      prime-agent   every provider
 ```
 
-A handler says which image carries the agent, what flags drive it headlessly, which variables it reads its endpoint from, and how to read its JSON stream. Nothing else about a run differs, so a seventh agent is a class in your own package, advertised in the `sanduk.agents` entry-point group or named directly as `--agent mypkg.handlers:MyAgent`. See [docs/agents.md](docs/agents.md).
+A handler says which image carries the agent, what flags drive it headlessly, which variables it reads its endpoint from, and how to read its JSON stream. Nothing else about a run differs, so an eighth agent is a class in your own package, advertised in the `sanduk.agents` entry-point group or named directly as `--agent mypkg.handlers:MyAgent`. See [docs/agents.md](docs/agents.md).
 
 ```text
 sanduk run 'Review this.' -w ./repo --mode sealed --agent hax \
@@ -157,6 +158,14 @@ hax is a static C binary with no approval gate, which suits a container that is 
 codex accepts only `wire_api = "responses"`, so it pairs with `openai` or with an `openai-compat` server that answers `/v1/responses`. It has no base-URL variable: sanduk passes the endpoint as a `-c model_providers...` override, which is why `argv` is handed the run's wiring. Its own sandbox is disabled with `--sandbox danger-full-access`, since the container is the boundary and codex's sandbox would only stop the work; `--skip-git-repo-check` is passed because the bind mount is usually not a repository.
 
 opencode takes its whole configuration from `OPENCODE_CONFIG_CONTENT`, so no `opencode.json` is written into the bind mount, where it would sit in your repository and be editable by the agent reading it. The provider block picks an npm driver by wire protocol: `@ai-sdk/anthropic` for Messages, `@ai-sdk/openai-compatible` for Chat Completions. Both are installed in the image, because the proxy network has no route to fetch one at runtime. `--model` is required: the config names one model and there is nothing to put in it otherwise.
+
+hermes is the one agent that cannot use the relay, and the only one whose image carries no node. It ignores every endpoint override there is -- measured against 0.19.0 with a stub upstream inside the container, `--base_url`, `OPENROUTER_BASE_URL` and `model.base_url` in `~/.hermes/config.yaml` all left the call going to openrouter.ai -- so `check` refuses `key-safe` and `sealed` by name rather than letting a run fail at its first call. `--mode open` is what remains: a disposable container and a bind mount, with your key inside it. `--model` is required and takes an OpenRouter id. It also prints prose rather than JSON, which is what `Reader.line` exists for, and it reports API calls rather than tokens, so its stats line says calls.
+
+```text
+export OPENROUTER_API_KEY=sk-or-v1-...
+sanduk run 'Summarise a.py.' -w ./work --agent hermes --provider openrouter \
+    --model deepseek/deepseek-v4-flash-0731 --mode open --max-turns 6
+```
 
 prime-agent is pi's CLI in PrimeIntellect's build: the release tarball declares `bin: prime-agent` and depends on the `@earendil-works/pi-*` packages, so its handler is a subclass of pi's and inherits the reader, the argv and the protocols. Three things differ, each measured rather than read. Its provider block names the credential's variable bare where pi writes `$NAME`. It has no `--no-approve`, so a `.prime/agent/settings.json` in the mounted directory is read: that steers the run without widening the box, which is the container and the relay either way. And its only tool is a Python REPL, so the image carries the kernel; without it the agent answers by trying to install `uv`, which the proxy network has no route for. The image installs a checksummed release tarball rather than an npm package.
 
@@ -260,13 +269,14 @@ src/sanduk/
     runs.py        which process owns which container; the orphan sweep
     assistants.py  identity, schedule, mailbox: the assistant commands
     agents/        the shipped handlers: claude.py, codex.py, hax.py,
-                   opencode.py, pi.py, prime.py
+                   hermes.py, opencode.py, pi.py, prime.py
     proxy.py       the host-side relay
     preflight.py   key validation, macOS firewall check
     resources/
         Containerfile.claude
         Containerfile.codex
         Containerfile.hax
+        Containerfile.hermes
         Containerfile.opencode
         Containerfile.pi
         Containerfile.prime

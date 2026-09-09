@@ -15,6 +15,7 @@ from sanduk.agents import BUILTIN
 from sanduk.agents.claude import ClaudeCode
 from sanduk.agents.codex import Codex
 from sanduk.agents.hax import Hax
+from sanduk.agents.hermes import Hermes
 from sanduk.agents.opencode import OpenCode
 from sanduk.agents.pi import Pi
 from sanduk.agents.prime import Prime
@@ -46,7 +47,15 @@ def flags(**kw) -> argparse.Namespace:
 def test_the_shipped_handlers_are_found_without_install_metadata():
     """A source checkout has no entry points; losing claude there would be the
     worst possible failure mode, so the built-ins are seeded directly."""
-    assert set(agent_names()) >= {"claude", "codex", "hax", "opencode", "pi", "prime"}
+    assert set(agent_names()) >= {
+        "claude",
+        "codex",
+        "hax",
+        "hermes",
+        "opencode",
+        "pi",
+        "prime",
+    }
     assert registry()["claude"] is ClaudeCode
 
 
@@ -731,3 +740,82 @@ def test_prime_passes_no_flag_its_build_does_not_have():
         Pi(), flags(agent="pi", model="m"), get_provider("openai")
     )
     assert argv[argv.index("--model") + 1] == "sanduk/m"
+
+
+# --- hermes -----------------------------------------------------------------
+
+
+SUMMARY = [
+    "🤖 AI Agent with Tool Calling",
+    "🔧 terminal",
+    "==================================================",
+    "📋 CONVERSATION SUMMARY",
+    "✅ Completed: True",
+    "📞 API Calls: 4",
+    "🎯 FINAL RESPONSE:",
+    "------------------------------",
+    "a.py adds two numbers.",
+    "👋 Agent execution completed!",
+]
+
+
+def drain_lines(reader, lines):
+    for line in lines:
+        reader.line(line, quiet=True)
+    return reader.finish()
+
+
+def test_hermes_is_read_line_by_line_because_it_prints_prose():
+    """The one agent with no JSON stream. `Reader.line` exists for it."""
+    outcome = drain_lines(Hermes().reader(), SUMMARY)
+    assert outcome is not None and outcome.ok
+    assert outcome.text == "a.py adds two numbers."
+    # Calls, not tokens: hermes reports no token counts at all.
+    assert outcome.stats == "4 api calls"
+
+
+def test_a_hermes_run_that_did_not_complete_is_not_ok():
+    outcome = drain_lines(Hermes().reader(), ["✅ Completed: False", "📞 API Calls: 1"])
+    assert outcome is not None and not outcome.ok
+
+
+def test_a_hermes_failure_line_is_the_error():
+    outcome = drain_lines(Hermes().reader(), ["❌ Failed to initialize agent: no key"])
+    assert outcome is not None and not outcome.ok
+    assert outcome.error == "Failed to initialize agent: no key"
+
+
+def test_nothing_read_is_no_outcome():
+    assert drain_lines(Hermes().reader(), ["🤖 AI Agent with Tool Calling"]) is None
+
+
+def test_hermes_traces_the_retries_and_the_answer(capsys):
+    """It prints no per-tool-call line, so a trace that showed one was reading
+    its status prose: `🔧 Available tools: 20` became `> Available`."""
+    reader = Hermes().reader()
+    noise = ["🔧 Available tools: 20", "⚠️ API call failed (attempt 1/3)"]
+    for line in [*noise, *SUMMARY]:
+        reader.line(line, quiet=False)
+    printed = capsys.readouterr().out
+    assert "! API call failed (attempt 1/3)" in printed
+    assert ". a.py adds two numbers." in printed
+    assert ">" not in printed
+
+
+def test_hermes_refuses_the_modes_it_cannot_be_pointed_at():
+    """Measured: --base_url, OPENROUTER_BASE_URL and config.yaml all leave the
+    call going to openrouter.ai, so a relayed run would fail at the first
+    call rather than at the flag."""
+    args = flags(agent="hermes", model="m")
+    args.proxy = True
+    with pytest.raises(AgentboxError, match="cannot be pointed at the relay"):
+        Hermes().check(args, get_provider("openai-compat"))
+    args.proxy = False
+    Hermes().check(args, get_provider("openai-compat"))
+
+
+def test_hermes_needs_a_model():
+    args = flags(agent="hermes")
+    args.proxy = False
+    with pytest.raises(AgentboxError, match="--model is required"):
+        Hermes().check(args, get_provider("openai-compat"))

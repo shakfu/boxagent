@@ -1,6 +1,6 @@
 # Agent handlers
 
-sanduk runs one agent CLI inside the container and reads its JSON stream. What that CLI is, how it is driven, and how its output is parsed live in a handler. Six ship: `claude`, `codex`, `hax`, `opencode`, `pi` and `prime`. A seventh is a class you write, in your own package. `prime` is a subclass of `pi`: two builds of one CLI, where only the variable names, one flag and the image differ.
+sanduk runs one agent CLI inside the container and reads its JSON stream. What that CLI is, how it is driven, and how its output is parsed live in a handler. Seven ship: `claude`, `codex`, `hax`, `hermes`, `opencode`, `pi` and `prime`. An eighth is a class you write, in your own package. `prime` is a subclass of `pi`: two builds of one CLI, where only the variable names, one flag and the image differ.
 
 ## What a handler answers
 
@@ -76,11 +76,13 @@ mine = "mypkg.handlers:MyAgent"
 
 A plugin that fails to import is reported and skipped, and one that claims a shipped name is refused: replacing `claude` would change what runs in the container without changing the command line.
 
-## Four things that are easy to get wrong
+## Five things that are easy to get wrong
 
 **The base URL prefix is yours to add.** The relay forwards paths unchanged and checks them against `Provider.routes`, so the base URL you hand the agent has to end where those routes begin. `provider.api_prefix` is that segment: `/v1` for most, `/api/v1` for OpenRouter. Claude Code is the exception that proves it — it appends `/v1/messages` itself, so its handler passes the bare root.
 
 **Not every agent reads its endpoint from a variable.** codex takes it as a `-c` config override in `argv`; opencode takes a whole JSON config through `OPENCODE_CONFIG_CONTENT`; pi reads a `models.json` its image's entrypoint writes from one. That is why `argv` is handed the run's `Wiring`. The credential still travels in `Wiring.key_env` and is named, not inlined, in either: `argv` is visible to `inspect`, and a config file written into the bind mount would be editable by the agent reading it.
+
+**Not every agent streams JSON.** `Reader.event` takes records; `Reader.line` takes every line that is not one, and does nothing by default. hermes prints prose, so its reader reads lines and its `event` is empty. Read what the agent actually prints before writing either: hermes has no per-tool-call line at all, and a trace built from its status prose reported `> Available` for `🔧 Available tools: 20`.
 
 **A handler is stateless; a reader is not.** The registry holds handler classes and `launch` calls `reader()` once per run. Keep the token tally and the final record on the reader, or one run's counts leak into the next.
 

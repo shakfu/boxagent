@@ -81,7 +81,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        agent: [claude, codex, hax, opencode, pi, prime]
+        agent: [claude, codex, hax, hermes, opencode, pi, prime]
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d

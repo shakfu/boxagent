@@ -11,10 +11,11 @@ from sanduk.agent import Agent
 from sanduk.agents.claude import ClaudeCode
 from sanduk.agents.codex import Codex
 from sanduk.agents.hax import Hax
+from sanduk.agents.hermes import Hermes
 from sanduk.agents.opencode import OpenCode
 from sanduk.agents.pi import Pi
 from sanduk.agents.prime import Prime
 
-BUILTIN: tuple[type[Agent], ...] = (ClaudeCode, Codex, Hax, OpenCode, Pi, Prime)
+BUILTIN: tuple[type[Agent], ...] = (ClaudeCode, Codex, Hax, Hermes, OpenCode, Pi, Prime)
 
-__all__ = ["BUILTIN", "ClaudeCode", "Codex", "Hax", "OpenCode", "Pi", "Prime"]
+__all__ = ["BUILTIN", "ClaudeCode", "Codex", "Hax", "Hermes", "OpenCode", "Pi", "Prime"]

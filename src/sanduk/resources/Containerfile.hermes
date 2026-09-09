@@ -1,0 +1,24 @@
+# hermes-agent is a Python package, so this is the one image with no node in
+# it. Pinned: an unpinned agent changes what runs in the container without a
+# commit here. 3.12 because the project caps itself below 3.14.
+FROM docker.io/library/python:3.12-slim
+
+# The repo is ahead of the index; this is the newest release on PyPI.
+ARG HERMES_VERSION=0.19.0
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git ripgrep ca-certificates curl jq \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir "hermes-agent==${HERMES_VERSION}"
+
+RUN useradd -m agent && mkdir -p /work && chown agent:agent /work
+USER agent
+ENV HOME=/home/agent \
+    PYTHONUNBUFFERED=1
+WORKDIR /work
+# `python -m run_agent`, not the `hermes-agent` console script: that script
+# calls main() with no arguments, so every flag is ignored and the module's
+# hardcoded demo query runs instead. The module's __main__ guard is what hands
+# the command line to Fire.
+ENTRYPOINT ["python", "-m", "run_agent"]

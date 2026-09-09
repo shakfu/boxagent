@@ -10,6 +10,7 @@ native daemon is the only configuration that can prove --proxy at all: Apple's
 engine and Docker Desktop both keep the bridge inside a VM.
 """
 
+import argparse
 import json
 import os
 import re
@@ -22,7 +23,7 @@ import pytest
 from sanduk import assistants, proxy
 from sanduk.agent import get_agent
 from sanduk.errors import AgentboxError
-from sanduk.providers import OPENAI_CHAT
+from sanduk.providers import OPENAI_CHAT, get_provider
 from sanduk.runtime import get_runtime, wait_for_gateway
 
 pytestmark = pytest.mark.container
@@ -33,17 +34,20 @@ IMAGE = os.environ.get("IMAGE", AGENT.image)
 NETWORK = os.environ.get("NETWORK", "sanduk-net")
 FAKE_KEY = "sk-ant-api03-REAL-KEY-STAYS-ON-HOST"
 
-# A pattern each agent's --version output must match. Test-local: an agent
-# handler has no business declaring a string that exists only to be asserted
-# here. Patterns rather than substrings because opencode prints a bare version
-# and no name, so there is nothing to match on but its shape.
+# What to ask each image, and what the answer has to match. Test-local: an
+# agent handler has no business declaring a string that exists only to be
+# asserted here. Patterns rather than substrings because opencode and pi print
+# a bare version and no name, so there is nothing to match on but its shape.
+# hermes has no version flag at all: its CLI is Fire over one function, so the
+# question that proves the image runs it is --help.
 VERSION_MARKER = {
-    "claude": r"Claude Code",
-    "codex": r"codex-cli",
-    "hax": r"hax",
-    "opencode": r"\d+\.\d+\.\d+",
-    "pi": r"\d+\.\d+\.\d+",
-    "prime": r"\d+\.\d+\.\d+",
+    "claude": ("--version", r"Claude Code"),
+    "codex": ("--version", r"codex-cli"),
+    "hax": ("--version", r"hax"),
+    "hermes": ("--help", r"--query|QUERY"),
+    "opencode": ("--version", r"\d+\.\d+\.\d+"),
+    "pi": ("--version", r"\d+\.\d+\.\d+"),
+    "prime": ("--version", r"\d+\.\d+\.\d+"),
 }
 
 
@@ -84,12 +88,13 @@ def isolated_network():
 
 
 def test_the_image_runs_its_agent():
+    question, _ = VERSION_MARKER[AGENT.name]
     out = subprocess.run(
-        [ENGINE.cli, "run", "--rm", IMAGE, "--version"], capture_output=True, text=True
+        [ENGINE.cli, "run", "--rm", IMAGE, question], capture_output=True, text=True
     )
     # Both streams: prime-agent prints its version on stderr, pi on stdout.
     printed = out.stdout + out.stderr
-    assert re.search(VERSION_MARKER[AGENT.name], printed), printed
+    assert re.search(VERSION_MARKER[AGENT.name][1], printed), printed
 
 
 def test_default_network_reaches_the_internet():
@@ -275,11 +280,28 @@ args = ["--upstream", "http://127.0.0.1:{chat_stub}", "--skip-key-check"]
     return home
 
 
+def relays() -> bool:
+    """Whether this agent can be pointed at the relay at all. hermes cannot:
+    it ignores every endpoint override, and its handler says so."""
+    args = argparse.Namespace(
+        agent=AGENT.name, model="stub-model", proxy=True, effort=None,
+        max_turns=None, allowed_tools=None, permission_mode=None, bare=False,
+        agent_key_env=None, agent_base_url_env=None,
+    )  # fmt: skip
+    try:
+        AGENT.check(args, get_provider("openai-compat"))
+    except AgentboxError:
+        return False
+    return True
+
+
 def test_a_wakeup_is_a_container_a_relayed_call_and_a_row(assistant_home):
     """The whole assistant path, with nothing stubbed but the model: config on
     disk -> container -> relay -> report -> database."""
     if OPENAI_CHAT not in AGENT.protocols:
         pytest.skip(f"{AGENT.name} does not speak Chat Completions; the stub only does")
+    if not relays():
+        pytest.skip(f"{AGENT.name} cannot be pointed at the relay")
     db = assistants.connect()
     assistants.register(db, assistants.load(assistant_home))
     assistants.tell(db, "triage", "this message rides the wakeup")

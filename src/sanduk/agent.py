@@ -92,11 +92,22 @@ def completion_protocols(provider: Provider) -> set[str]:
 
 
 class Reader(ABC):
-    """One run's JSON stream, consumed as it arrives."""
+    """One run's output, consumed as it arrives.
+
+    Most agents stream JSON and only `event` matters. One does not: hermes
+    prints prose, so `line` is offered every line that is not a JSON record.
+    """
 
     @abstractmethod
     def event(self, record: dict[str, Any], quiet: bool) -> None:
         """Consume one record: trace it, tally it, or keep it."""
+
+    def line(self, text: str, quiet: bool) -> None:  # noqa: B027
+        """Consume one line that is not a JSON record.
+
+        Deliberately concrete and empty: an agent that streams JSON has no use
+        for it, and making it abstract would add a `pass` to every handler.
+        """
 
     @abstractmethod
     def finish(self) -> Outcome | None:
@@ -256,12 +267,14 @@ def launch(
     try:
         assert proc.stdout is not None
         for raw in proc.stdout:
-            line = raw.strip()
-            if not line.startswith("{"):
+            line = raw.rstrip("\n")
+            if not line.strip().startswith("{"):
+                reader.line(line, quiet)
                 continue
             try:
                 record = json.loads(line)
             except json.JSONDecodeError:
+                reader.line(line, quiet)
                 continue
             reader.event(record, quiet)
         proc.wait(timeout=30)
