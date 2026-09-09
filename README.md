@@ -18,7 +18,7 @@ In its stronger mode the container has no route off the host and never holds the
 
   - `docker`, with a daemon on this kernel. `--proxy` needs the bridge gateway to be an address this host can bind, which Docker Desktop, Colima and Lima do not give.
 
-- Python 3.11 or later, and `uv`
+- Python 3.11 or later. `uv` as well, for a source checkout: the Makefile targets run through it
 
 - An API key for the provider you pick, in that provider's variable: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`. `--provider openai-compat` needs none.
 
@@ -26,21 +26,37 @@ Apple's `container` runs **Linux** containers as lightweight VMs. There is no su
 
 Each agent has its own image. Claude Code, codex, opencode and pi run on `node:22-slim`; hax's is `debian:trixie-slim` with no language runtime, since the binary is static. All add `git`, `ripgrep`, `curl`, `jq`, and `python3`. The agent can only run what is in it. Without an interpreter it falls back to hand-tracing and still writes a confident report, so check whether the findings say they were reproduced. There is no C, Go, or Rust toolchain: point `--image` at your own, or `--containerfile` at one to build.
 
+## Install
+
+```text
+pip install sanduk
+```
+
+Note that `uv tool install sanduk` and `pipx install sanduk` do the same thing into their own environment, which is what you want for a globally available command line tool. There are no Python dependencies to resolve either way; a container engine remains as a requirement.
+
+The wheel carries a `Containerfile` per agent, so `sanduk build` works from a plain install with no checkout.
+
 ## Quickstart
 
 ```text
+pip install sanduk
+export ANTHROPIC_API_KEY=sk-ant-...
+sanduk build                                              # the claude image
+sanduk run 'Summarise every Python file here.' -w ./work --proxy
+sanduk --help
+```
+
+From a checkout, where the Makefile wraps the same commands:
+
+```text
+git clone https://github.com/shakfu/sanduk.git && cd sanduk
 make sync
 make image
 export ANTHROPIC_API_KEY=sk-ant-...
 make run TASK='Summarise every Python file here.' WORK=./work
 ```
 
-Or directly, which is where all the flags live:
-
-```text
-uv run sanduk run 'Summarise every Python file here.' -w ./work --proxy
-uv run sanduk --help
-```
+`make` targets call `uv run sanduk`, so an editable checkout and an installed copy take the same flags.
 
 ## Two modes
 
