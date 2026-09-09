@@ -23,6 +23,11 @@ classifiers = [
     "Typing :: Typed",
 ]
 
+[project.urls]
+Homepage = "https://github.com/shakfu/sanduk"
+Repository = "https://github.com/shakfu/sanduk"
+Changelog = "https://github.com/shakfu/sanduk/blob/main/CHANGELOG.md"
+
 [project.scripts]
 sanduk = "sanduk.cli:main"
 
