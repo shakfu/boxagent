@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -64,7 +65,7 @@ from sanduk.runtime import (
     get_runtime,
     wait_for_gateway,
 )
-from sanduk.util import note
+from sanduk.util import note, seconds
 
 COMMANDS = (
     "run",
@@ -101,6 +102,14 @@ MODES = {
     "sealed": Mode(relayed=True, egress=False, network="sanduk-net"),
 }
 DEFAULT_MODE = "open"
+
+# The network holder is started for the run's length plus this, so teardown
+# happens while the bridge is still up.
+HOLDER_MARGIN = 300
+# A week. Not a technical limit: the holder is a container that sits for as
+# long as it is told, and this is the guard against `--timeout 9000000` being
+# a typo that parks one for months.
+MAX_TIMEOUT = 7 * 86400
 
 RUN_EPILOG = (
     "The API key comes from the provider's environment variable only.\n"
@@ -236,7 +245,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     g = p.add_argument_group("container")
     g.add_argument("--cpus", type=int, default=4)
     g.add_argument("--memory", default="4G")
-    g.add_argument("--timeout", type=int, default=900, help="seconds (default: 900)")
+    g.add_argument(
+        "--timeout",
+        default="900",
+        metavar="DURATION",
+        help="how long one run may take: seconds, or a suffix of s, m, h, d "
+        "(default: 900)",
+    )
     g.add_argument(
         "-e",
         "--env",
@@ -298,6 +313,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--proxy-network",
         default=None,
         help="network to create/use (default: sanduk-net sealed, sanduk-open key-safe)",
+    )
+    g.add_argument(
+        "--budget",
+        type=float,
+        metavar="USD",
+        help="stop the run once its calls have cost more than this. The call "
+        "that crosses the ceiling is already paid for. Only a provider that "
+        "reports cost can enforce it, which today is openrouter",
     )
     g.add_argument(
         "--proxy-port",
@@ -363,6 +386,16 @@ def resolve_mode(args: argparse.Namespace) -> argparse.Namespace:
             f"--proxy is the old spelling of --mode sealed; it cannot be "
             f"combined with --mode {args.mode}"
         )
+    # Seconds from here on: a duration is a spelling, not a type.
+    args.timeout = seconds(args.timeout)
+    if args.timeout > MAX_TIMEOUT:
+        raise AgentboxError(
+            f"--timeout {args.timeout}s is longer than a week. The network "
+            f"holder is started for the run's length, so a typo here parks a "
+            f"container for that long. Pass at most {MAX_TIMEOUT}s"
+        )
+    if args.budget is not None and args.budget <= 0:
+        raise AgentboxError("--budget must be a positive number of dollars")
     mode = MODES[args.mode]
     args.proxy = mode.relayed
     args.egress = mode.egress
@@ -672,6 +705,17 @@ def select(args: argparse.Namespace) -> Selection:
     """Resolve the agent and provider together, and refuse an unusable pair."""
     agent, image, containerfile = resolve_image(args)
     provider = resolve_provider(args)
+    if getattr(args, "budget", None) is not None:
+        if not provider.cost_field:
+            raise AgentboxError(
+                f"--budget cannot be enforced against {provider.name}: it "
+                f"reports tokens, not cost. Only openrouter reports cost"
+            )
+        if not args.proxy:
+            raise AgentboxError(
+                "--budget is counted by the relay, which --mode open does not "
+                "start. Use --mode key-safe or sealed"
+            )
     agent.check(args, provider)
     return Selection(
         agent=agent, provider=provider, image=image, containerfile=containerfile
@@ -828,7 +872,11 @@ def run(args: argparse.Namespace) -> int:
         if not args.dry_run:
             if args.rebuild or not runtime.image_exists(sel.image):
                 runtime.build_image(sel.image, sel.containerfile)
-            holder = runtime.hold_network_up(network, sel.image)
+            # Outlive the run: the holder going first takes the bridge, and
+            # the relay's address, with it.
+            holder = runtime.hold_network_up(
+                network, sel.image, args.timeout + HOLDER_MARGIN
+            )
             if holder and record:
                 record.add(holder)
             if not wait_for_gateway(gateway):
@@ -904,7 +952,8 @@ def run(args: argparse.Namespace) -> int:
         if proxy_srv:
             proxy_srv.shutdown()
             cfg = proxy_srv.cfg
-            note(f"proxy relayed {cfg.requests}, rejected {cfg.rejected}")
+            spent = f", ${cfg.spent:.4f} spent" if cfg.provider.cost_field else ""
+            note(f"proxy relayed {cfg.requests}, rejected {cfg.rejected}{spent}")
         if holder:
             runtime.destroy(holder)
         if record:
@@ -914,7 +963,7 @@ def run(args: argparse.Namespace) -> int:
 
     note(f"{time.monotonic() - started:.1f}s wall")
     if outcome:
-        note(outcome.stats)
+        note(agent_stats(outcome.stats, proxy_srv))
         if not outcome.ok:
             note(f"agent reported an error: {outcome.error}")
             return 1
@@ -945,9 +994,23 @@ def _start_relay(
         log_bodies=args.log_bodies,
         allow_models=args.allow_model,
         max_tokens_cap=args.max_tokens_cap,
+        budget=args.budget,
         log_dir=str(log_dir) if log_dir else None,
         provider=provider,
     )
+
+
+def agent_stats(stats: str, relay: ProxyServer | None) -> str:
+    """The agent's own tally, minus a cost it had no way to know.
+
+    An agent prices a run from its model catalogue. Through the relay the model
+    is named by sanduk's own provider id, which no catalogue has, so the agent
+    reports $0.0000 one line under the relay's real figure. Two dollar amounts,
+    one of them wrong, is worse than one.
+    """
+    if relay is None or not relay.cfg.provider.cost_field or relay.cfg.spent <= 0:
+        return stats
+    return re.sub(r",?\s*\$0\.0+\b", "", stats).strip()
 
 
 def _collect_report(

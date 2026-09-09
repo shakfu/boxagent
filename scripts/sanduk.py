@@ -103,6 +103,15 @@ CREDENTIAL_HEADERS = {"x-api-key", "authorization", "api-key", "x-goog-api-key"}
 STRIP_REQ = HOP | CREDENTIAL_HEADERS | {"host", "content-length", "accept-encoding"}
 STRIP_RESP = HOP | {"content-length"}
 
+# What to call a refusal, by status. An agent branches on these strings.
+REFUSAL_KINDS = {
+    400: "invalid_request_error",
+    401: "authentication_error",
+    402: "budget_exceeded",
+    403: "forbidden",
+}
+
+
 # A chunk-size line is a few hex digits; anything longer is not one.
 CHUNK_LINE_MAX = 1024
 
@@ -218,7 +227,13 @@ class Handler(BaseHTTPRequestHandler):
         with self.cfg.lock:
             self.cfg.rejected += 1
         self.note(f"REJECT {self.client_address[0]} {self.command} {self.path}: {why}")
-        body = b'{"type":"error","error":{"type":"forbidden"}}'
+        # The reason, not just the status: an agent that only sees "forbidden"
+        # logs that, retries on it, and tells its user nothing. This is
+        # sanduk's own policy talking to a container that already knows it is
+        # behind a relay, so there is nothing here it does not know.
+        body = json.dumps(
+            {"type": "error", "error": {"type": REFUSAL_KINDS.get(code, "forbidden"), "message": why}}
+        ).encode()
         self.send_response(code)
         # The request body is still in the socket, unread: a refusal happens
         # before it is worth reading. Reusing the connection had the next parse

@@ -14,6 +14,7 @@ import pytest
 
 from sanduk import assistants
 from sanduk.errors import AgentboxError
+from sanduk.util import seconds
 
 CONFIG = """
 name = "triage"
@@ -60,16 +61,24 @@ def runs_of(db):
 
 
 @pytest.mark.parametrize(
-    ("text", "expected"), [("45s", 45), ("30m", 1800), ("2h", 7200), ("1d", 86400)]
+    ("text", "expected"),
+    [("45s", 45), ("30m", 1800), ("2h", 7200), ("1d", 86400), ("900", 900), (900, 900)],
 )
-def test_an_interval_is_a_number_and_a_unit(text, expected):
-    assert assistants.seconds(text) == expected
+def test_a_duration_is_seconds_unless_it_carries_a_unit(text, expected):
+    assert seconds(text) == expected
 
 
-@pytest.mark.parametrize("text", ["", "30", "m", "0m", "-5m", "1w", "half an hour"])
+@pytest.mark.parametrize("text", ["", "m", "0m", "-5m", "0", "1w", "half an hour"])
 def test_anything_else_is_refused_by_name(text):
-    with pytest.raises(AgentboxError, match="interval"):
-        assistants.seconds(text)
+    with pytest.raises(AgentboxError, match="duration"):
+        seconds(text)
+
+
+def test_a_timeout_reads_the_same_way_as_an_interval(home):
+    """One config file with `every = "30m"` beside `timeout = 900` said
+    nothing about which key meant what; now both take either spelling."""
+    (home / "assistant.toml").write_text(CONFIG + '\ntimeout = "5m"\n')
+    assert assistants.load(home).timeout == 300
 
 
 def test_a_config_is_read_with_the_directory_as_its_root(home):

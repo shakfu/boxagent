@@ -106,6 +106,11 @@ class Provider:
     auth_scheme: str = ""
     scheme: str = "https"
     has_auth: bool = True
+    # Whether a completion's usage block carries what the call cost. Only
+    # OpenRouter does; the others report tokens and leave pricing to you, so a
+    # dollar budget is refused for them rather than guessed from a table this
+    # package would have to keep current.
+    cost_field: str | None = None
     # Whether a streamed request needs stream_options.include_usage added for
     # the response to report tokens at all. A provider property, not a protocol
     # one: OpenAI and OpenRouter both speak openai-chat, and only OpenAI needs
@@ -208,6 +213,10 @@ OPENROUTER_PROVIDER = Provider(
     auth_header="authorization",
     auth_scheme="Bearer",
     validate_path="/api/v1/key",
+    # Every response carries `usage.cost`, in credits, without asking. The
+    # `usage: {include: true}` parameter that used to be needed is deprecated
+    # and has no effect.
+    cost_field="cost",
 )
 
 PROVIDERS: dict[str, Provider] = {

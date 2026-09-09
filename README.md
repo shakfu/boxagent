@@ -187,7 +187,13 @@ pi speaks all three protocols the relay carries, and its provider block names wh
 
 ## Flags worth knowing
 
+`--budget 2.50` stops a run *after* its calls have cost that much. The relay counts `usage.cost`, which OpenRouter returns on every response, and refuses the next call with a 402 once the total is past the ceiling. The ceiling is therefore crossed exactly once, by one call: what that call will cost is not knowable before it is made, and every estimate of it is wrong in one direction or the other -- a growing conversation makes each call dearer than the last, while cache reads make them cheaper. `--max-tokens-cap` is what bounds the size of the crossing call.
+
+Only OpenRouter reports cost, so `--budget` is refused for the other providers rather than guessed from a price table this package would have to keep current, and it needs the relay, so `--mode open` is refused too. The run's total is printed at teardown, and the refusal reaches the agent as `budget_exceeded` with the two figures in it.
+
 `--allow-model claude-opus-5` and `--max-tokens-cap N` are enforced on the host, where the container cannot edit them. The cap clamps whichever field the protocol uses: `max_tokens`, `max_completion_tokens`, or `max_output_tokens`. Claude Code asks for `max_tokens: 64000` on every call, so a cap below that silently truncates every request.
+
+`--timeout` bounds one run (default 900s). Every duration sanduk takes reads the same way: a bare number is seconds, and a suffix of `s`, `m`, `h` or `d` multiplies it, so `--timeout 15m` and `--timeout 900` are the same run. In a relayed mode the network holder is started for that long plus five minutes, because vmnet keeps the host bridge up only while a container is attached: if the holder went first, the relay's address would go with it. A timeout over a week is refused, as is a zero or negative one. One upstream call is capped separately at 900s by the relay.
 
 `--log-bodies` records each request body: a digest line per call, full JSON under `--log-dir` (default `./sanduk-logs`, deliberately outside the bind mount so the agent cannot read or edit its own audit trail). Bodies contain the system prompt and every file the agent has read.
 
@@ -217,7 +223,7 @@ model    = "claude-sonnet-5"
 every    = "30m"          # an interval, not a cron expression
 brief    = "brief.md"
 gate     = "gate.sh"      # optional: a non-zero exit skips the wakeup, unpaid
-timeout  = 900
+timeout  = "15m"          # or 900; a bare number is seconds
 max_failures = 3
 mode     = "sealed"       # open | key-safe | sealed, as above
 approval = false          # true: results wait for `sanduk approve` before delivery

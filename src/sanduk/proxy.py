@@ -66,6 +66,15 @@ STRIP_REQ = (
 )
 STRIP_RESP = HOP | {"content-length"}
 
+# What to call a refusal, by status. An agent branches on these strings.
+REFUSAL_KINDS = {
+    400: "invalid_request_error",
+    401: "authentication_error",
+    402: "budget_exceeded",
+    403: "forbidden",
+}
+
+
 # A chunk-size line is a few hex digits; anything longer is not one.
 CHUNK_LINE_MAX = 1024
 
@@ -82,6 +91,7 @@ class Config:
         log_bodies: bool,
         allow_models: Iterable[str] | None = None,
         max_tokens_cap: int | None = None,
+        budget: float | None = None,
         log_dir: str | None = None,
         provider: Provider | None = None,
     ) -> None:
@@ -101,6 +111,11 @@ class Config:
         self.log_bodies = log_bodies
         self.allow_models = frozenset(allow_models) if allow_models else None
         self.max_tokens_cap = max_tokens_cap
+        # Dollars, and what has been spent of them. Enforced between calls:
+        # a streamed response reports its cost at the end, so the call that
+        # crosses the line is paid for before the line is seen.
+        self.budget = budget
+        self.spent = 0.0
         self.log_dir = log_dir
         self.body_seq = 0
         self.requests = 0
@@ -142,7 +157,7 @@ class UsageSniffer:
         content_encoding: str = "",
         protocol: Protocol = ANTHROPIC,
     ) -> None:
-        self.usage: dict[str, int] = {}
+        self.usage: dict[str, float] = {}
         self._fields = protocol.usage_fields
         self._sse = "text/event-stream" in content_type
         self._buf = b""
@@ -194,20 +209,20 @@ class UsageSniffer:
         return "".join(f" {name}={u.get(f[name], 0)}" for name in self.ORDER if name in f)
 
 
-def _flatten(usage: object, prefix: str = "") -> dict[str, int]:
+def _flatten(usage: object, prefix: str = "") -> dict[str, float]:
     """Integer counters from a usage block, nested keys joined with a dot.
 
     OpenAI reports cached tokens as prompt_tokens_details.cached_tokens, two
     levels down. A flat scan drops it silently and the log line then reads
     cache_read=0, which is indistinguishable from a genuine cache miss.
     """
-    out: dict[str, int] = {}
+    out: dict[str, float] = {}
     if not isinstance(usage, dict):
         return out
     for key, value in usage.items():
         if isinstance(value, bool):
             continue
-        if isinstance(value, int):
+        if isinstance(value, int | float):
             out[f"{prefix}{key}"] = value
         elif isinstance(value, dict):
             out.update(_flatten(value, f"{prefix}{key}."))
@@ -231,7 +246,16 @@ class Handler(BaseHTTPRequestHandler):
         with self.cfg.lock:
             self.cfg.rejected += 1
         self.note(f"REJECT {self.client_address[0]} {self.command} {self.path}: {why}")
-        body = b'{"type":"error","error":{"type":"forbidden"}}'
+        # The reason, not just the status: an agent that only sees "forbidden"
+        # logs that, retries on it, and tells its user nothing. This is
+        # sanduk's own policy talking to a container that already knows it is
+        # behind a relay, so there is nothing here it does not know.
+        body = json.dumps(
+            {
+                "type": "error",
+                "error": {"type": REFUSAL_KINDS.get(code, "forbidden"), "message": why},
+            }
+        ).encode()
         self.send_response(code)
         # The request body is still in the socket, unread: a refusal happens
         # before it is worth reading. Reusing the connection had the next parse
@@ -359,6 +383,18 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorized():
             return
         cfg = self.cfg
+        if cfg.budget is not None and cfg.spent >= cfg.budget:
+            # Stop after crossing, not before: what the next call will cost is
+            # not knowable, and every estimate of it is wrong in one direction
+            # or the other. The ceiling is a line the run stops past, and the
+            # message says so rather than reading like arithmetic gone wrong.
+            self.refuse(
+                402,
+                f"over budget: ${cfg.spent:.4f} spent against a "
+                f"${cfg.budget:.4f} ceiling. The call that crossed it was "
+                f"already paid for",
+            )
+            return
         started = time.monotonic()
 
         try:
@@ -433,9 +469,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
                 sent += len(chunk)
                 sniffer.feed(chunk)
+            sniffer.close()
+            # Count before the client sees the end of the response: it may send
+            # the next request the moment it does, and a budget checked against
+            # a total that has not caught up would let that one through.
+            with cfg.lock:
+                cfg.spent += float(sniffer.usage.get(cfg.provider.cost_field or "", 0))
             self.wfile.write(b"0\r\n\r\n")
             self.wfile.flush()
-            sniffer.close()
         except (BrokenPipeError, ConnectionResetError):
             self.note("client hung up mid-stream")
         finally:
@@ -462,6 +503,7 @@ def start_proxy(
     log_bodies: bool = False,
     allow_models: Iterable[str] | None = None,
     max_tokens_cap: int | None = None,
+    budget: float | None = None,
     log_dir: str | None = None,
     provider: Provider | None = None,
 ) -> tuple[ProxyServer, int]:
@@ -477,10 +519,11 @@ def start_proxy(
         allow_paths,
         upstream or (provider or ANTHROPIC_PROVIDER).host,
         log_bodies,
-        allow_models,
-        max_tokens_cap,
-        log_dir,
-        provider,
+        allow_models=allow_models,
+        max_tokens_cap=max_tokens_cap,
+        budget=budget,
+        log_dir=log_dir,
+        provider=provider,
     )
     srv = ProxyServer((host, port), cfg)
     threading.Thread(target=srv.serve_forever, daemon=True).start()

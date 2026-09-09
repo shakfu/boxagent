@@ -346,3 +346,16 @@ def test_a_writable_extra_mount_leaves_readonly_off():
     spec.mounts = [Mount(host=Path("/tmp/repo"), dest="/repo")]
     argv = get_runtime().run_argv(spec)
     assert argv[argv.index("--mount") + 1] == "type=bind,source=/tmp/repo,target=/repo"
+
+
+def test_the_holder_sleeps_as_long_as_it_is_told(monkeypatch):
+    """It was a flat day, which is a ceiling nothing announced: a longer run
+    lost its bridge mid-flight and failed as if the network had broken."""
+    engine = get_runtime("apple")
+    seen = []
+    monkeypatch.setattr(engine, "run_argv", lambda spec: seen.append(spec) or ["true"])
+    responses(monkeypatch, returncode=0)
+    engine.hold_network_up("sanduk-net", "img", 3600)
+    engine.hold_network_up("sanduk-net", "img")
+    assert [spec.command for spec in seen] == [["3600"], [str(runtime.HOLDER_SECONDS)]]
+    assert seen[0].entrypoint == "sleep"

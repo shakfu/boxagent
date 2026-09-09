@@ -30,7 +30,7 @@ from typing import cast
 
 from sanduk.errors import AgentboxError
 from sanduk.runs import owner_alive
-from sanduk.util import note, state_dir
+from sanduk.util import note, seconds, state_dir
 
 CONFIG_NAME = "assistant.toml"
 DEFAULT_EVERY = "30m"
@@ -40,8 +40,6 @@ MAX_BACKOFF = 24 * 3600
 # What `run` exits with when a signal tore it down. An interrupted wakeup is not
 # a broken assistant, so it is not counted as a failure.
 INTERRUPTED = 130
-
-UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS assistants (
@@ -81,18 +79,6 @@ CREATE TABLE IF NOT EXISTS outbox (
   rejected_at INTEGER
 );
 """
-
-
-def seconds(text: str) -> int:
-    """`30m` -> 1800. Intervals, not cron: a schedule of wakeups needs no more,
-    and a cron parser is a dependency this package does not have."""
-    value = str(text).strip()
-    if len(value) < 2 or value[-1] not in UNITS or not value[:-1].isdigit():
-        raise AgentboxError(f"{text!r} is not an interval like 45s, 30m, 2h, 1d")
-    total = int(value[:-1]) * UNITS[value[-1]]
-    if total <= 0:
-        raise AgentboxError(f"{text!r} is not a positive interval")
-    return total
 
 
 @dataclass(frozen=True)
@@ -155,7 +141,7 @@ def load(directory: Path) -> Assistant:
         model=None if conf.get("model") is None else str(conf["model"]),
         runtime=None if conf.get("runtime") is None else str(conf["runtime"]),
         mode=read_mode(conf, path),
-        timeout=int(conf.get("timeout", 900)),
+        timeout=seconds(conf.get("timeout", 900)),
         every=seconds(conf.get("every", DEFAULT_EVERY)),
         brief=resolve("brief"),
         gate=resolve("gate"),

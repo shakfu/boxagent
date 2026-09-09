@@ -959,3 +959,110 @@ def test_a_refused_request_closes_its_connection(relay):
     assert response.status == 401
     assert response.will_close, "a refused connection must not be reused"
     conn.close()
+
+
+# --- cost budget ------------------------------------------------------------
+
+
+def costing(cost, path="/api/v1/chat/completions"):
+    """A fake OpenRouter that charges `cost` credits per call."""
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        calls = 0
+
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            Handler.calls += 1
+            payload = json.dumps(
+                {"usage": {"prompt_tokens": 10, "completion_tokens": 2, "cost": cost}}
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, Handler, path
+
+
+def openrouter_relay(plaintext_upstream, budget=None, cost=0.4):
+    srv, handler, path = costing(cost)
+    relay, port = proxy.start_proxy(
+        REAL_KEY,
+        TOKEN,
+        "127.0.0.1",
+        upstream=f"127.0.0.1:{srv.server_address[1]}",
+        provider=providers.get_provider("openrouter"),
+        budget=budget,
+    )
+    return relay, port, handler, path
+
+
+def test_cost_is_read_out_of_the_usage_block(plaintext_upstream):
+    """OpenRouter reports `usage.cost` on every response without being asked."""
+    relay, port, _, path = openrouter_relay(plaintext_upstream)
+    try:
+        assert bearer_call(port, path, body=message())[0] == 200
+        assert relay.cfg.spent == pytest.approx(0.4)
+    finally:
+        relay.shutdown()
+
+
+def test_a_budget_refuses_the_call_after_it_is_spent(plaintext_upstream):
+    """Enforced between calls: a streamed response reports its cost at the end,
+    so the call that crosses the line is paid for before the line is seen."""
+    relay, port, handler, path = openrouter_relay(plaintext_upstream, budget=1.0)
+    try:
+        assert bearer_call(port, path, body=message())[0] == 200
+        assert bearer_call(port, path, body=message())[0] == 200
+        assert relay.cfg.spent == pytest.approx(0.8)
+        assert bearer_call(port, path, body=message())[0] == 200
+        # 1.2 spent of 1.0: the next one is refused, not this one.
+        assert bearer_call(port, path, body=message())[0] == 402
+        assert handler.calls == 3
+        assert relay.cfg.rejected == 1
+    finally:
+        relay.shutdown()
+
+
+def test_no_budget_counts_but_does_not_stop(plaintext_upstream):
+    relay, port, handler, path = openrouter_relay(plaintext_upstream, cost=9.0)
+    try:
+        for _ in range(3):
+            assert bearer_call(port, path, body=message())[0] == 200
+        assert handler.calls == 3
+        assert relay.cfg.spent == pytest.approx(27.0)
+    finally:
+        relay.shutdown()
+
+
+def test_a_refusal_says_why_in_its_body(plaintext_upstream):
+    """An agent that only sees "forbidden" logs that, retries on it, and tells
+    its user nothing about a budget."""
+    relay, port, _, path = openrouter_relay(plaintext_upstream, budget=0.1, cost=0.4)
+    try:
+        assert bearer_call(port, path, body=message())[0] == 200
+        status, body = bearer_call(port, path, body=message())
+        assert status == 402
+        error = json.loads(body)["error"]
+        assert error["type"] == "budget_exceeded"
+        assert "$0.4000 spent against a $0.1000 ceiling" in error["message"]
+    finally:
+        relay.shutdown()
+
+
+def test_every_refusal_carries_its_own_kind(relay):
+    port, _, _ = relay()
+    _, body = call(port, "/v1/messages", token="wrong", body=message())
+    error = json.loads(body)["error"]
+    assert error["type"] == "authentication_error"
+    assert "run token" in error["message"]
+    _, body = call(port, "/v1/nope", body=message())
+    assert json.loads(body)["error"]["type"] == "forbidden"

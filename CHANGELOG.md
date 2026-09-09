@@ -4,6 +4,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Nothing
 
 ## [Unreleased]
 
+## [0.2.3]
+
+### Added
+
+- `--budget USD`, a cost ceiling for one run. OpenRouter returns `usage.cost` on every response -- the `usage: {include: true}` parameter that used to be needed is deprecated and has no effect -- so the relay adds it up and refuses the next call with a 402 once the total is reached. Refused for every other provider: they report tokens, and pricing those means a table this package would have to keep current. Refused in `--mode open` as well, where there is no relay to count. The ceiling is crossed exactly once, by the call that crosses it: what a call costs is not knowable before it is made, and an estimator would be wrong in one direction or the other -- a growing conversation makes each call dearer than the last, cache reads make them cheaper. `--max-tokens-cap` bounds the size of that last call. The cost is recorded before the client is released, so the call after it cannot slip through on a total that has not caught up. The run's spend joins the relay's teardown line.
+
+### Changed
+
+- A refusal says why in its body, and names its kind: `authentication_error`, `forbidden`, `budget_exceeded`, `invalid_request_error`. Every refusal used to send `{"type":"forbidden"}` whatever the reason, so an agent stopped by a budget reported "forbidden" to its user and to its logs, and its retry logic saw a permission problem. This is sanduk's own policy talking to a container that already knows it is behind a relay.
+
+- The agent's own tally drops a zero cost when the relay has a real one. An agent prices a run from its model catalogue, which never held the id the relay hands it, so a run against OpenRouter printed `$0.0000` from the agent one line under `$0.0396 spent` from the relay.
+
+- Every duration reads the same way: a bare number is seconds, a suffix of `s`, `m`, `h` or `d` multiplies it. `--timeout 15m` works, and so does `timeout = "15m"` in `assistant.toml`, which used to raise `ValueError: invalid literal for int()` from inside `load` -- a traceback rather than a message, in a file whose `every = "30m"` sat two lines above it. One parser in `sanduk.util` now serves both keys and the flag.
+
+### Fixed
+
+- The network holder is started for the run's length plus five minutes, not a flat day. vmnet only keeps the host bridge up while a container is attached, so a relayed run past 24 hours lost the bridge -- and with it the address the relay is bound to -- and failed as if the network had broken, with nothing having announced the ceiling. `--timeout` over a week is now refused, and so is a zero or negative one, which used to arm a watchdog that fired immediately.
+
 ### Added
 
 - `--agent hermes`, Nous Research's hermes-agent, and `Reader.line` for it. It is the only shipped agent that prints prose instead of a JSON stream, so the reader contract grew an optional hook that takes every line which is not a record; every other handler ignores it. It is also the only one that cannot be pointed at the relay: measured against 0.19.0 with a stub upstream inside the container, `--base_url`, `OPENROUTER_BASE_URL` and `model.base_url` in `~/.hermes/config.yaml` each left the call going to openrouter.ai and returning its own 401. `check` refuses `key-safe` and `sealed` by name, so the run stops at the flag rather than at the first API call, and `--mode open` is what it supports: a disposable container holding your key. The image is `python:3.12-slim` with `hermes-agent==0.19.0`, the newest published; the repository is at 0.21.1. Its entry point is `python -m run_agent`, not the `hermes-agent` console script, which calls `main()` with no arguments and runs a hardcoded demo query with every flag ignored. Its stats line says API calls, because it reports no token counts.

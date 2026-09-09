@@ -32,6 +32,10 @@ from sanduk.util import note, run
 # stop or delete is found by it. Nothing else is touched.
 CONTAINER_PREFIX = "sanduk-"
 
+# How long the network holder sleeps when the caller does not say. A day, which
+# is what it always was; `run` sizes it to the run instead.
+HOLDER_SECONDS = 86400
+
 
 @dataclass(frozen=True)
 class Container:
@@ -185,12 +189,18 @@ class Runtime:
         r = run([self.cli, "network", self.delete_verb, name], capture_output=True)
         note(f"deleted network {name}" if r.returncode == 0 else f"no network {name}")
 
-    def hold_network_up(self, network: str, image: str) -> str | None:
+    def hold_network_up(
+        self, network: str, image: str, seconds: int = HOLDER_SECONDS
+    ) -> str | None:
         """Start a placeholder container so the host bridge exists.
 
         Without it the proxy cannot bind the gateway address and would have to
         fall back to 0.0.0.0, which puts it on Wi-Fi and LAN too. Returns the
         container to tear down, or None when the engine does not need one.
+
+        `seconds` is how long it holds. It used to be a flat day, which is a
+        ceiling nothing announced: a longer run lost its bridge mid-flight and
+        failed as if the network had broken. The caller sizes it to the run.
         """
         if not self.needs_network_holder:
             return None
@@ -202,7 +212,7 @@ class Runtime:
             network=network,
             detach=True,
             entrypoint="sleep",
-            command=["86400"],
+            command=[str(seconds)],
         )
         r = run(self.run_argv(spec), capture_output=True)
         if r.returncode != 0:

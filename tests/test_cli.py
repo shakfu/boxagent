@@ -6,12 +6,20 @@ Every run here is a --dry-run: nothing is built and nothing is started.
 
 import argparse
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from sanduk.agent import KEY_ENV, REPORT_NAME, Outcome
 from sanduk.agents.claude import ClaudeCode
-from sanduk.cli import _collect_report, main, parse_args, parse_mounts
+from sanduk.cli import (
+    MAX_TIMEOUT,
+    _collect_report,
+    agent_stats,
+    main,
+    parse_args,
+    parse_mounts,
+)
 from sanduk.errors import AgentboxError
 from sanduk.runtime import Container
 
@@ -693,3 +701,100 @@ def test_destroy_takes_every_network_a_mode_creates(engine):
     mode's bridge behind."""
     assert main(["destroy"]) == 0
     assert set(engine.deleted_networks) == {"sanduk-net", "sanduk-open"}
+
+
+# --- how long a run may last ------------------------------------------------
+
+
+def test_a_timeout_longer_than_the_holder_would_sit_for_is_refused():
+    """The holder is started for the run's length, so a typo here parks a
+    container for months."""
+    with pytest.raises(AgentboxError, match="longer than a week"):
+        parse_args(["run", "task", "--timeout", str(MAX_TIMEOUT + 1)])
+    assert parse_args(["run", "task", "--timeout", "7d"]).timeout == MAX_TIMEOUT
+
+
+@pytest.mark.parametrize("value", ["0", "-30", "5 minutes", "1w"])
+def test_a_timeout_that_is_not_a_duration_is_refused(value):
+    with pytest.raises(AgentboxError, match="duration"):
+        parse_args(["run", "task", "--timeout", value])
+
+
+@pytest.mark.parametrize(("value", "expected"), [("90", 90), ("15m", 900), ("2h", 7200)])
+def test_a_timeout_carries_its_unit_or_means_seconds(value, expected):
+    assert parse_args(["run", "task", "--timeout", value]).timeout == expected
+
+
+def test_the_holder_is_started_for_longer_than_the_run(tmp_path, monkeypatch):
+    """It going first takes the bridge, and the relay's address, with it."""
+    held = {}
+
+    class Engine(StubEngine):
+        gateway_hint = ""
+
+        def ensure_network(self, name, internal=True):
+            return "10.0.0.1", "10.0.0.0/24"
+
+        def hold_network_up(self, network, image, seconds=None):
+            held["seconds"] = seconds
+            return None
+
+        def run_argv(self, spec):
+            return ["stub", "run", spec.image]
+
+    monkeypatch.setattr("sanduk.cli.get_runtime", lambda _: Engine())
+    argv = ["run", "task", "-w", str(tmp_path), "--mode", "sealed"]
+    # The run stops at the gateway this stub cannot make bindable; the holder
+    # is started before that, which is what this asserts.
+    assert main([*argv, "--timeout", "60", "--skip-key-check"]) != 0
+    assert held["seconds"] > 60
+
+
+# --- cost budget ------------------------------------------------------------
+
+
+def test_a_budget_needs_a_provider_that_reports_cost(tmp_path, monkeypatch, capsys):
+    """Anthropic and OpenAI report tokens; pricing them would mean a table this
+    package would have to keep current."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    argv = ["run", "task", "-w", str(tmp_path), "--mode", "sealed", "--budget", "5"]
+    assert main([*argv, "--provider", "openai", "--dry-run"]) == 2
+    assert "reports tokens, not cost" in capsys.readouterr().err
+
+
+def test_a_budget_needs_the_relay(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or")
+    argv = ["run", "task", "-w", str(tmp_path), "--provider", "openrouter"]
+    assert main([*argv, "--budget", "5", "--mode", "open", "--dry-run"]) == 2
+    assert "--mode open does not start" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_a_budget_that_cannot_be_spent_is_refused(value):
+    with pytest.raises(AgentboxError, match="positive"):
+        parse_args(["run", "task", "--budget", value])
+
+
+def relay_that_spent(amount, reports_cost=True):
+    provider = SimpleNamespace(cost_field="cost" if reports_cost else None)
+    return SimpleNamespace(cfg=SimpleNamespace(spent=amount, provider=provider))
+
+
+def test_the_agents_own_cost_goes_when_the_relay_has_a_real_one():
+    """The agent prices a run from its catalogue, which never held the model id
+    the relay hands it, so it reports $0.0000 under the relay's real figure."""
+    stats = "6,394 in (0 cached) / 306 out, $0.0000"
+    assert agent_stats(stats, relay_that_spent(0.0396)) == "6,394 in (0 cached) / 306 out"
+
+
+def test_an_agents_real_cost_is_left_alone():
+    stats = "23,398 in (15,381 cached) / 864 out, $0.1200"
+    assert agent_stats(stats, relay_that_spent(0.0396)) == stats
+
+
+@pytest.mark.parametrize(
+    "relay", [None, relay_that_spent(0.0), relay_that_spent(0.5, reports_cost=False)]
+)
+def test_nothing_is_stripped_without_a_figure_to_prefer(relay):
+    stats = "10 in / 2 out, $0.0000"
+    assert agent_stats(stats, relay) == stats
