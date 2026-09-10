@@ -543,7 +543,7 @@ def test_the_stats_file_of_a_run_that_reported_nothing(tmp_path):
         "exit": 124,
         "ok": False,
         "stats": "",
-        "error": "",
+        "error": "the agent exited without a final result",
         "report": None,
     }
 

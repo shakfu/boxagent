@@ -232,7 +232,10 @@ class Handler(BaseHTTPRequestHandler):
         # sanduk's own policy talking to a container that already knows it is
         # behind a relay, so there is nothing here it does not know.
         body = json.dumps(
-            {"type": "error", "error": {"type": REFUSAL_KINDS.get(code, "forbidden"), "message": why}}
+            {
+                "type": "error",
+                "error": {"type": REFUSAL_KINDS.get(code, "forbidden"), "message": why},
+            }
         ).encode()
         self.send_response(code)
         # The request body is still in the socket, unread: a refusal happens
@@ -1077,12 +1080,20 @@ def main(argv=None):
             f"${result.get('total_cost_usd', 0):.4f}",
             file=sys.stderr,
         )
-        if result.get("is_error"):
-            print(
-                f"sanduk: agent reported an error: {result.get('result')}",
-                file=sys.stderr,
-            )
-            return 1
+    if rc < 0:
+        # Killed by a signal: the shell's 128 + N, not a negative status.
+        rc = 128 - rc
+    code = rc
+    if not result:
+        # No terminal record: the agent never finished, whatever its status says.
+        print("sanduk: the agent exited without a final result", file=sys.stderr)
+        code = rc or 1
+    elif result.get("is_error"):
+        print(
+            f"sanduk: agent reported an error: {result.get('result')}",
+            file=sys.stderr,
+        )
+        code = 1
 
     if report.is_file():
         if args.report:
@@ -1092,9 +1103,9 @@ def main(argv=None):
             print(f"sanduk: report -> {report}", file=sys.stderr)
     else:
         print(f"sanduk: the agent wrote no {REPORT_NAME}", file=sys.stderr)
-        if result and result.get("result"):
+        if result and result.get("result") and not result.get("is_error"):
             print(f"\n{result['result']}")
-    return 0 if rc == 0 else rc
+    return code
 
 
 if __name__ == "__main__":

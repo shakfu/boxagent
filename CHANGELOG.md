@@ -4,6 +4,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Nothing
 
 ## [Unreleased]
 
+### Fixed
+
+- A run whose agent reports an error still writes `--stats-file` and copies `--report`. It returned first, so a failed wakeup recorded no token count, and its outbox entry read "(no report, exit 1)" beside a report the agent had written.
+
+- A run with no final result exits 1, even when the agent exited 0. Every reader returns None when its terminal record never arrives, and the run treated that as success: an assistant marked its messages answered by an agent that had answered nothing.
+
+- A run whose client is killed by a signal exits 128 plus the signal number. The raw negative status reached the shell as 247 for SIGKILL and was stored in `runs` as -9.
+
+`scripts/sanduk.py` has the last two fixes, and the `--report` half of the first.
+
 ## [0.2.3]
 
 ### Added

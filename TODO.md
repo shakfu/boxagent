@@ -42,6 +42,8 @@ Ordered by how much they would change a decision, not by effort.
 
 - **No container reuse.** Every run pays a fresh VM boot. Fine for the experiment; wrong if this ever runs in a loop.
 
+- **Someday: re-implement in Go.** A static binary removes the Python 3.11 install step, which macOS does not provide. Go's `net/http` would also stream relay bodies. Go over Rust: the stdlib covers the relay and subprocess work, where Rust needs `tokio`, `hyper` and `rustls`. Costs: the entry-point plugin model, the importable package, and zero runtime dependencies (SQLite, TOML). Wait until the `Runtime` and `Agent` seams settle. Until then, ship through `uv tool` or PyApp.
+
 ## Nice to have
 
 - `--report` copies `REPORT.md` out, but nothing collects other artifacts the agent writes outside the mount.

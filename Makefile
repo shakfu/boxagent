@@ -71,16 +71,16 @@ coverage-html:  ## Fast suite with an HTML coverage report
 	@echo "Coverage report: htmlcov/index.html"
 
 lint:  ## Lint with ruff, applying fixes
-	@$(RUN) ruff check --fix src/ tests/
+	@$(RUN) ruff check --fix src/ tests/ scripts/
 
 lint-check:  ## Lint with ruff, reporting only
-	@$(RUN) ruff check src/ tests/
+	@$(RUN) ruff check src/ tests/ scripts/
 
 format:  ## Format with ruff
-	@$(RUN) ruff format src/ tests/
+	@$(RUN) ruff format src/ tests/ scripts/
 
 format-check:  ## Check formatting without modifying files
-	@$(RUN) ruff format --check src/ tests/
+	@$(RUN) ruff format --check src/ tests/ scripts/
 
 typecheck:  ## Type check with mypy
 	@$(RUN) mypy src/$(PKG)

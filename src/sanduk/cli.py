@@ -964,10 +964,6 @@ def run(args: argparse.Namespace) -> int:
     note(f"{time.monotonic() - started:.1f}s wall")
     if outcome:
         note(agent_stats(outcome.stats, proxy_srv))
-        if not outcome.ok:
-            note(f"agent reported an error: {outcome.error}")
-            return 1
-
     return _collect_report(args, workdir, outcome, rc)
 
 
@@ -1019,6 +1015,19 @@ def _collect_report(
     outcome: Outcome | None,
     rc: int,
 ) -> int:
+    """Copy the report out and record the run, failed or not; return its status."""
+    if rc < 0:
+        # Killed by a signal: the shell's 128 + N, not a negative status.
+        rc = 128 - rc
+    if outcome is None:
+        # No terminal record: the agent never finished, whatever its status says.
+        error, code = "the agent exited without a final result", rc or 1
+        note(error)
+    elif not outcome.ok:
+        error, code = outcome.error, 1
+        note(f"agent reported an error: {error}")
+    else:
+        error, code = "", rc
     report = workdir / REPORT_NAME
     if args.stats_file:
         # The exit code is all a caller gets from `main`, and the token line is
@@ -1027,10 +1036,10 @@ def _collect_report(
         args.stats_file.write_text(
             json.dumps(
                 {
-                    "exit": rc,
+                    "exit": code,
                     "ok": bool(outcome and outcome.ok),
                     "stats": outcome.stats if outcome else "",
-                    "error": outcome.error if outcome else "",
+                    "error": error,
                     "report": str(args.report or report) if report.is_file() else None,
                 }
             )
@@ -1045,7 +1054,7 @@ def _collect_report(
         note(f"the agent wrote no {REPORT_NAME}")
         if outcome and outcome.text:
             print(f"\n{outcome.text}")
-    return 0 if rc == 0 else rc
+    return code
 
 
 def assistant(args: argparse.Namespace) -> int:
