@@ -118,6 +118,38 @@ def test_image_exists_reads_the_listing(monkeypatch):
     assert not engine.image_exists("missing:latest")
 
 
+# --- networks ---------------------------------------------------------------
+
+
+def create_fails(monkeypatch):
+    """Every engine call fails, as a second `network create` does; no waiting."""
+    monkeypatch.setattr(
+        runtime,
+        "run",
+        lambda *a, **k: SimpleNamespace(
+            returncode=1, stdout="", stderr="has a pending operation"
+        ),
+    )
+    monkeypatch.setattr(runtime.time, "sleep", lambda s: None)
+
+
+def test_a_network_another_run_is_creating_is_waited_for(monkeypatch):
+    """Two runs found no network and both created it; the second create failed."""
+    engine = get_runtime()
+    answers = iter([None, None, ("10.0.0.1", "10.0.0.0/24")])
+    monkeypatch.setattr(engine, "network_info", lambda name: next(answers))
+    create_fails(monkeypatch)
+    assert engine.ensure_network("n") == ("10.0.0.1", "10.0.0.0/24")
+
+
+def test_a_network_that_never_appears_is_still_an_error(monkeypatch):
+    engine = get_runtime()
+    monkeypatch.setattr(engine, "network_info", lambda name: None)
+    create_fails(monkeypatch)
+    with pytest.raises(AgentboxError, match="pending operation"):
+        engine.ensure_network("n")
+
+
 # --- docker -----------------------------------------------------------------
 #
 # No daemon is contacted: every subprocess call is replaced. What these pin is
@@ -149,6 +181,19 @@ def test_docker_deletes_with_rm():
 def test_docker_needs_no_network_holder():
     """Docker creates the bridge with the network; vmnet only while attached."""
     assert not get_runtime("docker").needs_network_holder
+
+
+def test_an_oci_runtime_reaches_docker_before_the_image():
+    """gVisor or Kata in place of runc: the argv is the whole of the change."""
+    spec = ContainerSpec(name="n", image="img", oci_runtime="runsc")
+    argv = get_runtime("docker").run_argv(spec)
+    assert argv[argv.index("--runtime") + 1] == "runsc"
+    assert argv.index("--runtime") < argv.index("img")
+
+
+def test_without_an_oci_runtime_docker_keeps_its_default():
+    argv = get_runtime("docker").run_argv(ContainerSpec(name="n", image="img"))
+    assert "--runtime" not in argv
     assert get_runtime("docker").hold_network_up("sanduk-net", "img") is None
 
 

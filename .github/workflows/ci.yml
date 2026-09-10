@@ -72,6 +72,46 @@ jobs:
         if: always()
         run: docker network rm sanduk-ci || true
 
+  # The container suite again under gVisor's runsc, which serves system calls
+  # from a user-space kernel instead of the host's. Pinned and checksummed
+  # against a value reviewed here: it runs under every container in the job.
+  gvisor:
+    runs-on: ubuntu-latest
+    env:
+      GVISOR_RELEASE: "20260831"
+      GVISOR_SHA512: d22004c60601495d01a7863df3d10103883d2cddec5762297330069611a2f4daebfd10908356f577e2b8f55e2eb6f973d4d14c925db5c919623c83399188c164
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+
+      - name: Install runsc
+        run: |
+          url="https://storage.googleapis.com/gvisor/releases/release/${GVISOR_RELEASE}/x86_64"
+          curl -fsSLO "$url/gvisor.tar.zstd"
+          echo "${GVISOR_SHA512}  gvisor.tar.zstd" | sha512sum -c -
+          sudo tar --zstd -xf gvisor.tar.zstd -C /usr/local/bin
+          sudo /usr/local/bin/runsc install
+          sudo systemctl reload docker
+          docker info --format '{{json .Runtimes}}' | grep -q runsc
+
+      - name: Build the agent image
+        run: make image AGENT=hax RUNTIME=docker
+
+      - name: Integration suite under runsc
+        env:
+          RUNTIME: docker
+          AGENT: hax
+          NETWORK: sanduk-ci
+          OCI_RUNTIME: runsc
+        run: uv run pytest -q -m container
+
+      - name: Tear down
+        if: always()
+        run: docker network rm sanduk-ci || true
+
   # Every shipped image, built and asked what it is. A handler is written
   # against one CLI's flags and one JSON stream; an upstream release that
   # changes either breaks a run and nothing else here would notice.

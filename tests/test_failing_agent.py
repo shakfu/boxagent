@@ -154,6 +154,15 @@ def test_a_hung_agent_exits_124_and_its_container_is_deleted(monkeypatch, work):
     assert list(runs_dir().glob("*.json")) == []
 
 
+def test_a_timed_out_run_still_records_why(monkeypatch, work, tmp_path):
+    stats = tmp_path / "stats.json"
+    flags = ["--timeout", "1", "--stats-file", str(stats)]
+    code, _ = run_with(monkeypatch, work, agent(then="time.sleep(60)"), *flags)
+    assert code == 124
+    found = json.loads(stats.read_text())
+    assert found["exit"] == 124 and "--timeout" in found["error"]
+
+
 def test_a_failed_run_still_records_its_cost_and_copies_its_report(
     monkeypatch, work, tmp_path
 ):

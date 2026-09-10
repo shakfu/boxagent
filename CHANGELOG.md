@@ -1,8 +1,14 @@
 # Changelog
 
-Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Nothing is released yet; everything below is unreleased initial work.
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+### Added
+
+- `--oci-runtime NAME`, Docker only, renders as `docker run --runtime NAME`: gVisor's `runsc`, or Kata's `io.containerd.kata.v2` for a VM per container. On Linux the agent otherwise shares the host kernel, and a kernel escape lands in the host where the relay holds the key. Refused under `--runtime apple`, where each container is already a VM. A CI job runs the container suite under `runsc`; Kata is not measured. See [docs/dev/microvms.md](docs/dev/microvms.md).
+
+- The `runs` table records why a wakeup failed, and `sanduk runs` prints it; an outbox entry with no report carries it too. The exit code alone could not tell a timeout from the agent's own error or a run with no final result. A timed-out run now writes `--stats-file` and copies `--report` like any other failed run; it used to exit before either.
 
 ### Fixed
 
@@ -13,6 +19,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Nothing
 - A run whose client is killed by a signal exits 128 plus the signal number. The raw negative status reached the shell as 247 for SIGKILL and was stored in `runs` as -9.
 
 `scripts/sanduk.py` has the last two fixes, and the `--report` half of the first.
+
+- Two relayed runs that both find their network missing both start. Each created it, and the second create failed on Apple's engine with "has a pending operation", stopping that run. This happens on first use and on the first runs after `destroy`. The second run now waits for the first run's network.
 
 ## [0.2.3]
 

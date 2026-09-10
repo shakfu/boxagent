@@ -79,6 +79,7 @@ class ContainerSpec:
     network: str | None = None
     detach: bool = False
     entrypoint: str | None = None
+    oci_runtime: str | None = None  # what starts the container: runsc, Kata
 
 
 class Runtime:
@@ -88,6 +89,9 @@ class Runtime:
     cli = ""
     delete_verb = "delete"
     install_hint = ""
+    # Whether the program that starts a container can be swapped, for gVisor
+    # or Kata in place of runc. See docs/dev/microvms.md.
+    takes_oci_runtime = False
     # vmnet-style engines only create the host bridge while a container is
     # attached; Docker and Podman create it with the network.
     needs_network_holder = False
@@ -179,6 +183,14 @@ class Runtime:
             argv.append("--internal")
         r = run([*argv, name], capture_output=True)
         if r.returncode != 0:
+            # Two runs that both found no network both create it, and the second
+            # create fails. The network it wanted is the first run's: wait for it.
+            # Apple's engine creates one in under 0.1s.
+            for _ in range(20):
+                info = self.network_info(name)
+                if info:
+                    return info
+                time.sleep(0.5)
             raise AgentboxError(f"could not create network {name}: {r.stderr.strip()}")
         info = self.network_info(name)
         if not info:
@@ -260,6 +272,8 @@ class Runtime:
             argv += ["--network", spec.network]
         if spec.entrypoint:
             argv += ["--entrypoint", spec.entrypoint]
+        if spec.oci_runtime:
+            argv += ["--runtime", spec.oci_runtime]
         argv.append(spec.image)
         return argv + spec.command
 
@@ -371,6 +385,7 @@ class Docker(Runtime):
     )
     delete_verb = "rm"
     install_hint = "Install from docs.docker.com/get-docker/."
+    takes_oci_runtime = True
     needs_network_holder = False
     gateway_hint = (
         " A daemon inside a VM (Docker Desktop, Colima, Lima) keeps the bridge "

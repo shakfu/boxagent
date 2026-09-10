@@ -265,6 +265,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="point the agent at this endpoint directly, without a relay",
     )
     g.add_argument("--network", help="attach to this container network")
+    g.add_argument(
+        "--oci-runtime",
+        metavar="NAME",
+        help="docker only: the OCI runtime that starts the container, e.g. "
+        "runsc (gVisor) or io.containerd.kata.v2",
+    )
 
     g = p.add_argument_group("provider")
     g.add_argument(
@@ -807,6 +813,7 @@ def build_spec(
         # The agent's own settings first, so an explicit -e can override one.
         env=[f"{k}={v}" for k, v in wiring.env.items()] + list(args.env),
         network=network,
+        oci_runtime=args.oci_runtime,
     )
 
 
@@ -835,6 +842,12 @@ def _exit_on_signal(signum: int, _frame: object) -> None:
 
 def run(args: argparse.Namespace) -> int:
     runtime = get_runtime(args.runtime)
+    if args.oci_runtime and not runtime.takes_oci_runtime:
+        # Before anything starts: a sealed run would otherwise leave a holder.
+        raise AgentboxError(
+            f"--oci-runtime needs --runtime docker: {runtime.name} has no OCI "
+            "runtime to swap"
+        )
     sel = select(args)
     provider = sel.provider
     api_url = f"{provider.scheme}://{provider.host}"
@@ -934,16 +947,18 @@ def run(args: argparse.Namespace) -> int:
     # Restored in the finally below: `serve` calls this in a loop and its own
     # handlers have to survive a wakeup.
     handlers = [(s, signal.signal(s, _exit_on_signal)) for s in TEARDOWN_SIGNALS]
+    failure = ""
     try:
         outcome, rc = launch(sel.agent, cmd, args.timeout, args.quiet, env=child_env)
     except (KeyboardInterrupt, SystemExit) as e:
         runtime.destroy(name)
         code = e.code if isinstance(e, SystemExit) and isinstance(e.code, int) else 130
         raise AgentboxError("interrupted", code=code) from None
-    except AgentboxError:
-        # A timeout kill must not leave a container alive holding the key.
+    except AgentboxError as e:
+        # A timeout kill must not leave a container alive holding the key. The
+        # run is still recorded below, so a wakeup that timed out says so.
         runtime.destroy(name)
-        raise
+        outcome, rc, failure = None, e.code, str(e)
     else:
         # Before the record is released, so a kill in between still leaves the
         # container owned and reapable.
@@ -964,7 +979,7 @@ def run(args: argparse.Namespace) -> int:
     note(f"{time.monotonic() - started:.1f}s wall")
     if outcome:
         note(agent_stats(outcome.stats, proxy_srv))
-    return _collect_report(args, workdir, outcome, rc)
+    return _collect_report(args, workdir, outcome, rc, failure)
 
 
 def _start_relay(
@@ -1014,6 +1029,7 @@ def _collect_report(
     workdir: Path,
     outcome: Outcome | None,
     rc: int,
+    failure: str = "",
 ) -> int:
     """Copy the report out and record the run, failed or not; return its status."""
     if rc < 0:
@@ -1021,7 +1037,7 @@ def _collect_report(
         rc = 128 - rc
     if outcome is None:
         # No terminal record: the agent never finished, whatever its status says.
-        error, code = "the agent exited without a final result", rc or 1
+        error, code = failure or "the agent exited without a final result", rc or 1
         note(error)
     elif not outcome.ok:
         error, code = outcome.error, 1
@@ -1134,7 +1150,9 @@ def runs(args: argparse.Namespace) -> int:
         took = f"{r['ended_at'] - r['started_at']}s" if r["ended_at"] else "running"
         code = "-" if r["exit_code"] is None else str(r["exit_code"])
         cost = f"  {r['stats']}" if r["stats"] else ""
-        print(f"{r['id']:5}  {r['name']:16}  {when}  {took:>8}  exit {code}{cost}")
+        why = f"  {r['error']}" if r["error"] else ""
+        line = f"{r['id']:5}  {r['name']:16}  {when}  {took:>8}  exit {code}"
+        print(f"{line}{cost}{why}")
     if not found:
         note("no wakeups recorded")
     return 0

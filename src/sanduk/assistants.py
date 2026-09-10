@@ -59,7 +59,8 @@ CREATE TABLE IF NOT EXISTS runs (
   ended_at INTEGER,
   exit_code INTEGER,
   report_path TEXT,
-  stats TEXT
+  stats TEXT,
+  error TEXT
 );
 CREATE TABLE IF NOT EXISTS inbox (
   id INTEGER PRIMARY KEY,
@@ -217,8 +218,9 @@ def migrate(db: sqlite3.Connection) -> None:
     is not worth dropping to gain a column.
     """
     have = {row["name"] for row in db.execute("PRAGMA table_info(runs)")}
-    if "stats" not in have:
-        db.execute("ALTER TABLE runs ADD COLUMN stats TEXT")
+    for column in ("stats", "error"):
+        if column not in have:
+            db.execute(f"ALTER TABLE runs ADD COLUMN {column} TEXT")
     held = {row["name"] for row in db.execute("PRAGMA table_info(outbox)")}
     for column in ("approved_at", "rejected_at"):
         if column not in held:
@@ -500,13 +502,14 @@ def wake(db: sqlite3.Connection, assistant: Assistant, runtime: str | None = Non
     stats_file = state_dir() / "wakeup.json"
     stats_file.unlink(missing_ok=True)
     code = main(run_argv(assistant, task_file, report, runtime, stats_file))
-    stats = read_stats(stats_file)
+    stats, error = read_stats(stats_file)
 
     db.execute(
-        "UPDATE runs SET ended_at = ?, exit_code = ?, stats = ? WHERE id = ?",
-        (now(), code, stats, run_id),
+        "UPDATE runs SET ended_at = ?, exit_code = ?, stats = ?, error = ? WHERE id = ?",
+        (now(), code, stats, error, run_id),
     )
-    body = report.read_text() if report.is_file() else f"(no report, exit {code})"
+    why = f": {error}" if error else ""
+    body = report.read_text() if report.is_file() else f"(no report, exit {code}{why})"
     db.execute(
         "INSERT INTO outbox (name, run_id, created_at, body, approved_at) "
         "VALUES (?, ?, ?, ?, ?)",
@@ -522,16 +525,17 @@ def wake(db: sqlite3.Connection, assistant: Assistant, runtime: str | None = Non
     return code
 
 
-def read_stats(path: Path) -> str | None:
-    """The token line `run` recorded, if it got far enough to record one."""
+def read_stats(path: Path) -> tuple[str | None, str | None]:
+    """The token line and the error `run` recorded, if it got far enough."""
     try:
         found = json.loads(path.read_text())
     except (OSError, ValueError):
-        return None
+        return None, None
     finally:
         path.unlink(missing_ok=True)
     line = str(found.get("stats") or "").strip()
-    return line or None
+    error = str(found.get("error") or "").strip()
+    return line or None, error or None
 
 
 def schedule_next(db: sqlite3.Connection, assistant: Assistant, ok: bool) -> None:

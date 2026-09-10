@@ -452,7 +452,33 @@ def test_a_run_that_recorded_no_stats_leaves_the_column_empty(
     assert runs_of(db)[0]["stats"] is None
 
 
-def test_a_database_written_before_stats_existed_gains_the_column(state):
+def failing_with(error):
+    """A run command that fails the way `run` does: a stats file, then a code."""
+
+    def fake(argv):
+        stats = argv[argv.index("--stats-file") + 1]
+        with open(stats, "w") as f:
+            json.dump({"exit": 124, "stats": "", "error": error}, f)
+        return 124
+
+    return fake
+
+
+def test_a_wakeup_records_why_it_failed(db, registered, monkeypatch):
+    """The exit code alone cannot tell a timeout from the agent's own error."""
+    why = "agent exceeded --timeout 120s"
+    monkeypatch.setattr("sanduk.cli.main", failing_with(why))
+    assistants.wake(db, registered)
+    assert runs_of(db)[0]["error"] == why
+    assert assistants.outbox(db)[0]["body"] == f"(no report, exit 124: {why})"
+
+
+def test_a_wakeup_that_worked_records_no_error(db, registered, ran):
+    assistants.wake(db, registered)
+    assert runs_of(db)[0]["error"] is None
+
+
+def test_a_database_written_before_stats_existed_gains_the_columns(state):
     old = assistants.connect()
     old.execute("DROP TABLE runs")
     old.execute(
@@ -463,7 +489,8 @@ def test_a_database_written_before_stats_existed_gains_the_column(state):
     old.execute("INSERT INTO runs (name, started_at) VALUES ('triage', 1)")
     old.close()
     db = assistants.connect()
-    assert {r["name"] for r in db.execute("PRAGMA table_info(runs)")} >= {"stats"}
+    have = {r["name"] for r in db.execute("PRAGMA table_info(runs)")}
+    assert have >= {"stats", "error"}
     # The history survived the column.
     assert [r["name"] for r in db.execute("SELECT name FROM runs")] == ["triage"]
 

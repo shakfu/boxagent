@@ -292,6 +292,8 @@ Another agent is an `Agent` subclass in any package; see [docs/agents.md](docs/a
 
 Every container drops all Linux capabilities and runs under an init process. `--runtime docker` adds `--security-opt no-new-privileges` and `--pids-limit 1024`, which Apple's CLI has no flags for and which matter on a shared kernel; there each container is its own VM. The root filesystem stays writable, because every shipped agent writes under `$HOME`.
 
+`--oci-runtime NAME` swaps the program Docker starts the container with: `runsc` for gVisor, or `io.containerd.kata.v2` for a Kata VM. Either puts the agent off the host kernel. It is refused under `--runtime apple`. See [docs/dev/microvms.md](docs/dev/microvms.md).
+
 `--runtime docker` needs a daemon on this kernel, not one in a VM. Docker Desktop, Colima and Lima keep the bridge inside the VM, so the relay cannot bind the gateway; the run stops at the bind with that reason rather than listening somewhere the container cannot reach. `--runtime apple` is the macOS path.
 
 ## Make targets

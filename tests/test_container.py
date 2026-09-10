@@ -4,10 +4,11 @@
 They make no API calls: the relay is proved by the 401 an invalid key earns from
 the real endpoint, which is itself proof the request got there.
 
-RUNTIME, AGENT, IMAGE and NETWORK select what is booted, so the same suite runs
-against Apple `container` on macOS and against Docker on Linux. Docker on a
-native daemon is the only configuration that can prove --proxy at all: Apple's
-engine and Docker Desktop both keep the bridge inside a VM.
+RUNTIME, AGENT, IMAGE, NETWORK and OCI_RUNTIME select what is booted, so the
+same suite runs against Apple `container` on macOS and against Docker on Linux,
+under Docker's default OCI runtime or another such as runsc. Docker on a native
+daemon is the only configuration that can prove --proxy at all: Apple's engine
+and Docker Desktop both keep the bridge inside a VM.
 """
 
 import argparse
@@ -15,6 +16,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -32,6 +34,10 @@ ENGINE = get_runtime(os.environ.get("RUNTIME", "apple"))
 AGENT = get_agent(os.environ.get("AGENT", "claude"))
 IMAGE = os.environ.get("IMAGE", AGENT.image)
 NETWORK = os.environ.get("NETWORK", "sanduk-net")
+# Docker's --runtime, e.g. runsc: the same suite under another OCI runtime.
+OCI_RUNTIME = os.environ.get("OCI_RUNTIME")
+RUN = [ENGINE.cli, "run", "--rm", *(["--runtime", OCI_RUNTIME] if OCI_RUNTIME else [])]
+OCI_FLAGS = ["--oci-runtime", OCI_RUNTIME] if OCI_RUNTIME else []  # for `sanduk run`
 FAKE_KEY = "sk-ant-api03-REAL-KEY-STAYS-ON-HOST"
 
 # What to ask each image, and what the answer has to match. Test-local: an
@@ -52,7 +58,7 @@ VERSION_MARKER = {
 
 
 def sh(script, network=None, env=None):
-    cmd = [ENGINE.cli, "run", "--rm"]
+    cmd = list(RUN)
     if network:
         cmd += ["--network", network]
     for k in env or {}:
@@ -89,9 +95,7 @@ def isolated_network():
 
 def test_the_image_runs_its_agent():
     question, _ = VERSION_MARKER[AGENT.name]
-    out = subprocess.run(
-        [ENGINE.cli, "run", "--rm", IMAGE, question], capture_output=True, text=True
-    )
+    out = subprocess.run([*RUN, IMAGE, question], capture_output=True, text=True)
     # Both streams: prime-agent prints its version on stderr, pi on stdout.
     printed = out.stdout + out.stderr
     assert re.search(VERSION_MARKER[AGENT.name][1], printed), printed
@@ -194,6 +198,11 @@ class ChatStub(BaseHTTPRequestHandler):
 
     protocol_version = "HTTP/1.1"
     calls = 0
+    # The first request whose body contains `hold` is answered only once
+    # `release` is set, so a test can finish another run while this call waits.
+    hold: bytes | None = None
+    holding = threading.Event()
+    release = threading.Event()
 
     def log_message(self, *a):
         pass
@@ -204,6 +213,10 @@ class ChatStub(BaseHTTPRequestHandler):
     def do_POST(self):
         raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
         ChatStub.calls += 1
+        if ChatStub.hold and ChatStub.hold in raw:
+            ChatStub.hold = None
+            ChatStub.holding.set()
+            ChatStub.release.wait(timeout=300)
         streaming = b'"stream": true' in raw or b'"stream":true' in raw
         message = {"role": "assistant", "content": REPLY}
         usage = {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14}
@@ -264,6 +277,7 @@ def assistant_home(tmp_path, monkeypatch, chat_stub):
     home = tmp_path / "triage"
     home.mkdir()
     (home / "brief.md").write_text("Say hello. Write one line to REPORT.md.")
+    args = ["--upstream", f"http://127.0.0.1:{chat_stub}", "--skip-key-check", *OCI_FLAGS]
     (home / "assistant.toml").write_text(
         f"""
 name = "triage"
@@ -274,7 +288,7 @@ runtime = "{ENGINE.name}"
 every = "1h"
 timeout = 120
 brief = "brief.md"
-args = ["--upstream", "http://127.0.0.1:{chat_stub}", "--skip-key-check"]
+args = {json.dumps(args)}
 """
     )
     return home
@@ -321,3 +335,79 @@ def test_a_wakeup_is_a_container_a_relayed_call_and_a_row(assistant_home):
     assert assistants.row(db, "triage")["next_due_at"] > assistants.now() + 3000
     left = [c.name for c in ENGINE.list_containers("sanduk-") if "hold" not in c.name]
     assert left == []
+
+
+# --- two runs at once -------------------------------------------------------
+
+
+def sealed_run(port, task, work, state):
+    """One `sanduk run --mode sealed` in its own process, as a second terminal
+    or a wakeup would start it. A process, not a thread: `run` installs signal
+    handlers, which Python allows only on the main thread."""
+    argv = [
+        sys.executable, "-m", "sanduk", "run", task, "-w", str(work),
+        "--agent", AGENT.name, "--runtime", ENGINE.name, "--mode", "sealed",
+        "--proxy-network", NETWORK, "--provider", "openai-compat",
+        "--upstream", f"http://127.0.0.1:{port}", "--model", "stub-model",
+        "--skip-key-check", "--timeout", "240", *OCI_FLAGS,
+    ]  # fmt: skip
+    return subprocess.Popen(
+        argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env={**os.environ, "XDG_STATE_HOME": str(state)},
+    )
+
+
+def test_one_run_tears_down_while_another_is_mid_call(chat_stub, tmp_path, monkeypatch):
+    """Two sealed runs share the network. The first to finish deletes its own
+    holder while the second's call waits in its relay; the second still has to
+    get its answer back across the bridge."""
+    if OPENAI_CHAT not in AGENT.protocols:
+        pytest.skip(f"{AGENT.name} does not speak Chat Completions; the stub only does")
+    if not relays():
+        pytest.skip(f"{AGENT.name} cannot be pointed at the relay")
+    monkeypatch.setattr(ChatStub, "hold", b"SLOWLY")
+    monkeypatch.setattr(ChatStub, "holding", threading.Event())
+    monkeypatch.setattr(ChatStub, "release", threading.Event())
+    state = tmp_path / "state"
+    slow = sealed_run(chat_stub, "Answer SLOWLY.", tmp_path / "slow", state)
+    try:
+        assert ChatStub.holding.wait(timeout=180), "the slow run never reached the stub"
+        fast = sealed_run(chat_stub, "Answer now.", tmp_path / "fast", state)
+        out, _ = fast.communicate(timeout=240)
+        assert fast.returncode == 0, out
+        assert slow.poll() is None, "the slow run had ended before the fast one did"
+    finally:
+        ChatStub.release.set()
+        out, _ = slow.communicate(timeout=240)
+    assert slow.returncode == 0, out
+    left = [c.name for c in ENGINE.list_containers("sanduk-") if "hold" not in c.name]
+    assert left == []
+
+
+def test_two_runs_that_both_find_no_network_both_get_it():
+    """First use, or the first run after `destroy`: each checks, finds nothing,
+    and creates. The second create must not fail the second run."""
+    name = f"sanduk-race-{os.urandom(3).hex()}"
+    start = threading.Barrier(2)
+    found, failed = [], []
+
+    def create():
+        start.wait()
+        try:
+            found.append(ENGINE.ensure_network(name))
+        except AgentboxError as e:
+            failed.append(str(e))
+
+    threads = [threading.Thread(target=create) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=120)
+    try:
+        assert failed == []
+        assert len(found) == 2 and found[0] == found[1]
+    finally:
+        ENGINE.delete_network(name)

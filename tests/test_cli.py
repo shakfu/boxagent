@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from sanduk import assistants
 from sanduk.agent import KEY_ENV, REPORT_NAME, Outcome
 from sanduk.agents.claude import ClaudeCode
 from sanduk.cli import (
@@ -520,6 +521,15 @@ def test_an_empty_outbox_and_history_are_not_errors(assistant_dir, capsys):
     assert "nothing in the outbox" in err and "no wakeups recorded" in err
 
 
+def test_runs_says_why_a_wakeup_failed(assistant_dir, capsys):
+    assistants.connect().execute(
+        "INSERT INTO runs (name, started_at, ended_at, exit_code, error) "
+        "VALUES ('triage', 1, 121, 124, 'agent exceeded --timeout 120s')"
+    )
+    assert main(["runs"]) == 0
+    assert "agent exceeded --timeout 120s" in capsys.readouterr().out
+
+
 def test_the_stats_file_records_what_a_run_cost(tmp_path):
     """The exit code is all `main` returns and the token line is printed, so a
     caller recording what a wakeup cost has nowhere else to read it."""
@@ -748,6 +758,22 @@ def test_the_holder_is_started_for_longer_than_the_run(tmp_path, monkeypatch):
     # is started before that, which is what this asserts.
     assert main([*argv, "--timeout", "60", "--skip-key-check"]) != 0
     assert held["seconds"] > 60
+
+
+# --- OCI runtime ------------------------------------------------------------
+
+
+def test_an_oci_runtime_is_refused_where_there_is_none_to_swap(tmp_path, capsys):
+    """Apple's engine runs each container as its own VM already."""
+    argv = ["run", "task", "-w", str(tmp_path), "--oci-runtime", "runsc"]
+    assert main([*argv, "--dry-run"]) == 2
+    assert "--runtime docker" in capsys.readouterr().err
+
+
+def test_an_oci_runtime_reaches_the_docker_argv(tmp_path, capsys):
+    argv = ["run", "task", "-w", str(tmp_path), "--runtime", "docker"]
+    assert main([*argv, "--oci-runtime", "runsc", "--dry-run"]) == 0
+    assert "--runtime runsc" in capsys.readouterr().out
 
 
 # --- cost budget ------------------------------------------------------------
