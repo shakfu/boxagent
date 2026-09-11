@@ -22,6 +22,7 @@ from sanduk.cli import (
     parse_mounts,
 )
 from sanduk.errors import AgentboxError
+from sanduk.runs import runs_dir
 from sanduk.runtime import Container
 
 KEY = "sk-ant-api03-SECRET"
@@ -304,6 +305,9 @@ class StubEngine:
         self.deleted_images, self.deleted_networks, self.service = [], [], []
 
     def require(self):
+        pass
+
+    def require_run(self):
         pass
 
     def image_exists(self, image):
@@ -758,6 +762,8 @@ def test_the_holder_is_started_for_longer_than_the_run(tmp_path, monkeypatch):
     # is started before that, which is what this asserts.
     assert main([*argv, "--timeout", "60", "--skip-key-check"]) != 0
     assert held["seconds"] > 60
+    # The holder is destroyed on that path, so nothing is left to claim.
+    assert list(runs_dir().glob("*.json")) == []
 
 
 # --- OCI runtime ------------------------------------------------------------
@@ -774,6 +780,29 @@ def test_an_oci_runtime_reaches_the_docker_argv(tmp_path, capsys):
     argv = ["run", "task", "-w", str(tmp_path), "--runtime", "docker"]
     assert main([*argv, "--oci-runtime", "runsc", "--dry-run"]) == 0
     assert "--runtime runsc" in capsys.readouterr().out
+
+
+def test_an_engine_that_cannot_start_an_agent_is_refused_before_the_network(
+    tmp_path, monkeypatch, capsys
+):
+    """Snap Docker: refused before a sealed run creates a network to leave behind."""
+    made = []
+
+    class Engine(StubEngine):
+        def require_run(self):
+            raise AgentboxError("docker is the snap package")
+
+        def ensure_network(self, name, internal=True):
+            made.append(name)
+            return "10.0.0.1", "10.0.0.0/24"
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setattr("sanduk.cli.get_runtime", lambda _: Engine())
+    argv = ["run", "task", "-w", str(tmp_path), "--mode", "sealed", "--skip-key-check"]
+    assert main(argv) == 2
+    assert "snap" in capsys.readouterr().err
+    assert made == []
+    assert list(runs_dir().glob("*.json")) == []
 
 
 # --- cost budget ------------------------------------------------------------
@@ -813,14 +842,23 @@ def test_the_agents_own_cost_goes_when_the_relay_has_a_real_one():
     assert agent_stats(stats, relay_that_spent(0.0396)) == "6,394 in (0 cached) / 306 out"
 
 
-def test_an_agents_real_cost_is_left_alone():
-    stats = "23,398 in (15,381 cached) / 864 out, $0.1200"
-    assert agent_stats(stats, relay_that_spent(0.0396)) == stats
-
-
 @pytest.mark.parametrize(
-    "relay", [None, relay_that_spent(0.0), relay_that_spent(0.5, reports_cost=False)]
+    "relay", [None, relay_that_spent(0.0396), relay_that_spent(0.5, reports_cost=False)]
 )
-def test_nothing_is_stripped_without_a_figure_to_prefer(relay):
-    stats = "10 in / 2 out, $0.0000"
+def test_an_agents_real_cost_is_left_alone(relay):
+    stats = "23,398 in (15,381 cached) / 864 out, $0.1200"
     assert agent_stats(stats, relay) == stats
+
+
+@pytest.mark.parametrize("relay", [None, relay_that_spent(0.5, reports_cost=False)])
+def test_a_zero_with_no_figure_to_prefer_reads_as_unknown(relay):
+    """hax prices nothing, its catalogue disabled, and a relay to Anthropic
+    counts tokens, not cost. The zero says nothing about what the run cost."""
+    stats = "10 in / 2 out, $0.0000"
+    assert agent_stats(stats, relay) == "10 in / 2 out, cost unknown"
+
+
+def test_a_zero_the_relay_confirms_is_kept():
+    """openrouter/free reports its cost, and the cost is zero."""
+    stats = "10 in / 2 out, $0.0000"
+    assert agent_stats(stats, relay_that_spent(0.0)) == stats

@@ -28,7 +28,7 @@ Ordered by how much they would change a decision, not by effort.
 
 ## Design
 
-- **Docker is measured only in CI.** This machine has Apple's engine alone; the CI job runs Docker on a native Linux daemon. Docker Desktop, Colima and Lima cannot run the relayed modes, because the bridge gateway is not bindable from the host. Podman is not implemented; see [docs/dev/podman.md](docs/dev/podman.md).
+- **Docker is measured in CI and once by hand.** On 2026-09-11, docker-ce 29.8.0 on Ubuntu 24.04 passed the container suite for hax and claude, under runc and under gVisor's runsc 20260831. Ubuntu's snap package cannot run a container under `no-new-privileges`, so `run` refuses it. Docker Desktop, Colima and Lima cannot run the relayed modes, because the bridge gateway is not bindable from the host. Podman is not implemented; see [docs/dev/podman.md](docs/dev/podman.md).
 
 - **`--effort`, `--bare` and `--permission-mode` are Claude Code's flags on the shared parser.** claude and hax read them; the other five do not. A `--` passthrough is the cheaper shape.
 

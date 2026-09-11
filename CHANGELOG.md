@@ -4,6 +4,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.4]
+
 ### Added
 
 - `--oci-runtime NAME`, Docker only, renders as `docker run --runtime NAME`: gVisor's `runsc`, or Kata's `io.containerd.kata.v2` for a VM per container. On Linux the agent otherwise shares the host kernel, and a kernel escape lands in the host where the relay holds the key. Refused under `--runtime apple`, where each container is already a VM. A CI job runs the container suite under `runsc`; Kata is not measured. See [docs/dev/microvms.md](docs/dev/microvms.md).
@@ -11,6 +13,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The `runs` table records why a wakeup failed, and `sanduk runs` prints it; an outbox entry with no report carries it too. The exit code alone could not tell a timeout from the agent's own error or a run with no final result. A timed-out run now writes `--stats-file` and copies `--report` like any other failed run; it used to exit before either.
 
 ### Fixed
+
+- `run --runtime docker` refuses Docker's snap package before it creates anything. The snap's AppArmor profile blocks every exec under `--security-opt no-new-privileges`, so each container died at start with `exec /sbin/docker-init: operation not permitted`. Its private `/tmp` also turned `-w /tmp/...` into an empty `/work`, and the run discarded the agent's writes. Refused rather than run without the flag: that would weaken hardening silently and keep the `/tmp` loss. Other verbs still work there, so `destroy` can remove what an older run left. A new container test mounts a directory through sanduk's own argv and checks both directions; the wakeup tests could not catch either failure, because their stub never has the agent write.
+
+- A run that failed before its first container started left its ownership record in `~/.local/state/sanduk/runs` for good. The record was written before the engine check, and `sweep` keeps records for an engine it cannot reach, so a Linux run under the default `--runtime apple` added one that nothing removed. The record is now written just before the first container starts. The test suite wrote such records too; every test now gets its own `XDG_STATE_HOME`.
 
 - A run whose agent reports an error still writes `--stats-file` and copies `--report`. It returned first, so a failed wakeup recorded no token count, and its outbox entry read "(no report, exit 1)" beside a report the agent had written.
 
@@ -21,6 +27,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 `scripts/sanduk.py` has the last two fixes, and the `--report` half of the first.
 
 - Two relayed runs that both find their network missing both start. Each created it, and the second create failed on Apple's engine with "has a pending operation", stopping that run. This happens on first use and on the first runs after `destroy`. The second run now waits for the first run's network.
+
+- An agent's `$0.0000` reads `cost unknown` when the relay has no figure to put beside it. hax runs with its model catalogue disabled and priced every run at zero, including a sealed Anthropic run of 31,579 input tokens. A zero the OpenRouter relay confirms is kept, since free models exist. `--stats-file`, and so `sanduk runs`, now records the line the terminal prints; it kept the agent's raw one.
 
 ## [0.2.3]
 

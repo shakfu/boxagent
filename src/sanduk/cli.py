@@ -868,7 +868,9 @@ def run(args: argparse.Namespace) -> int:
         validate_key(key, api_url if args.proxy else (args.base_url or api_url), provider)
 
     name = f"{CONTAINER_PREFIX}{uuid.uuid4().hex[:8]}"
-    record: Run | None = None if args.dry_run else claim(args.runtime, name)
+    # Claimed just before the first container starts. An earlier claim outlived
+    # a run the engine refused: sweep keeps a record for an unreachable engine.
+    record: Run | None = None
     network: str | None = args.network
     proxy_srv: ProxyServer | None = None
     holder: str | None = None
@@ -877,7 +879,7 @@ def run(args: argparse.Namespace) -> int:
     child_env = os.environ.copy()
 
     if args.proxy:
-        runtime.require()
+        runtime.require_run()
         firewall_warning()
         network = args.proxy_network
         gateway, _ = runtime.ensure_network(network, internal=not args.egress)
@@ -885,16 +887,18 @@ def run(args: argparse.Namespace) -> int:
         if not args.dry_run:
             if args.rebuild or not runtime.image_exists(sel.image):
                 runtime.build_image(sel.image, sel.containerfile)
+            record = claim(args.runtime, name)
             # Outlive the run: the holder going first takes the bridge, and
             # the relay's address, with it.
             holder = runtime.hold_network_up(
                 network, sel.image, args.timeout + HOLDER_MARGIN
             )
-            if holder and record:
+            if holder:
                 record.add(holder)
             if not wait_for_gateway(gateway):
                 if holder:
                     runtime.destroy(holder)
+                record.release()
                 raise AgentboxError(
                     f"{gateway} never became bindable on this host.{runtime.gateway_hint}"
                 )
@@ -924,10 +928,12 @@ def run(args: argparse.Namespace) -> int:
         )
         return 0
 
-    runtime.require()
+    runtime.require_run()
     sweep()
     if args.rebuild or not runtime.image_exists(sel.image):
         runtime.build_image(sel.image, sel.containerfile)
+    if record is None:
+        record = claim(args.runtime, name)
 
     if args.proxy and args.egress:
         note(
@@ -978,7 +984,9 @@ def run(args: argparse.Namespace) -> int:
 
     note(f"{time.monotonic() - started:.1f}s wall")
     if outcome:
-        note(agent_stats(outcome.stats, proxy_srv))
+        # The stats file, and so `runs`, records the line the terminal shows.
+        outcome = replace(outcome, stats=agent_stats(outcome.stats, proxy_srv))
+        note(outcome.stats)
     return _collect_report(args, workdir, outcome, rc, failure)
 
 
@@ -1012,16 +1020,18 @@ def _start_relay(
 
 
 def agent_stats(stats: str, relay: ProxyServer | None) -> str:
-    """The agent's own tally, minus a cost it had no way to know.
+    """The agent's own tally, without a zero cost it had no way to know.
 
     An agent prices a run from its model catalogue. Through the relay the model
-    is named by sanduk's own provider id, which no catalogue has, so the agent
-    reports $0.0000 one line under the relay's real figure. Two dollar amounts,
-    one of them wrong, is worse than one.
+    is named by sanduk's own provider id, which no catalogue has, and hax runs
+    with its catalogue disabled, so either reports $0.0000. Beside the relay's
+    real figure the zero is dropped; with no figure it reads as unknown.
     """
-    if relay is None or not relay.cfg.provider.cost_field or relay.cfg.spent <= 0:
-        return stats
-    return re.sub(r",?\s*\$0\.0+\b", "", stats).strip()
+    if relay is not None and relay.cfg.provider.cost_field:
+        if relay.cfg.spent <= 0:
+            return stats  # the relay's own figure: a free model
+        return re.sub(r",?\s*\$0\.0+\b", "", stats).strip()
+    return re.sub(r"\$0\.0+\b", "cost unknown", stats)
 
 
 def _collect_report(

@@ -117,6 +117,11 @@ class Runtime:
     def require_service(self) -> None:
         """Engines with a background daemon check it here."""
 
+    def require_run(self) -> None:
+        """`require`, plus whatever else this engine needs to start an agent.
+        Only `run` calls it: the other verbs need the engine to answer, no more."""
+        self.require()
+
     # --- the engine's own service -------------------------------------------
 
     def service_status(self) -> str:
@@ -398,6 +403,20 @@ class Docker(Runtime):
         if r.returncode != 0:
             raise AgentboxError(
                 "the docker daemon is not reachable. Start it, then re-run."
+            )
+
+    def require_run(self) -> None:
+        # The snap reports its base as the daemon's OS, whatever the host runs:
+        # "Ubuntu Core 24" on an Ubuntu 24.04 host. DockerRootDir would also
+        # tell, but the snap lets a user move it.
+        super().require_run()
+        info = [self.cli, "info", "--format", "{{.OperatingSystem}}"]
+        if run(info, capture_output=True).stdout.startswith("Ubuntu Core"):
+            raise AgentboxError(
+                "docker is the snap package, which cannot run an agent. Its "
+                "AppArmor profile blocks every exec under --security-opt "
+                "no-new-privileges, and its /tmp is not this host's. Install "
+                "Docker Engine from docs.docker.com/engine/install/."
             )
 
     def image_exists(self, image: str) -> bool:

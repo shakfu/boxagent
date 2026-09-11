@@ -243,6 +243,28 @@ def test_an_unreachable_docker_daemon_is_named(monkeypatch):
         get_runtime("docker").require()
 
 
+def test_a_snap_docker_daemon_cannot_run_an_agent(monkeypatch):
+    """Its AppArmor profile blocks every exec under no-new-privileges."""
+    responses(monkeypatch, stdout="Ubuntu Core 24\n")
+    monkeypatch.setattr(runtime.shutil, "which", lambda _: "/snap/bin/docker")
+    with pytest.raises(AgentboxError, match="snap package"):
+        get_runtime("docker").require_run()
+
+
+def test_a_snap_docker_daemon_still_answers_the_other_verbs(monkeypatch):
+    """ps, clean and destroy work there; destroy removes an older run's network."""
+    responses(monkeypatch, stdout="Ubuntu Core 24\n")
+    monkeypatch.setattr(runtime.shutil, "which", lambda _: "/snap/bin/docker")
+    get_runtime("docker").require()
+
+
+def test_a_native_docker_daemon_can_run_an_agent(monkeypatch):
+    calls = responses(monkeypatch, stdout="Ubuntu 24.04.5 LTS\n")
+    monkeypatch.setattr(runtime.shutil, "which", lambda _: "/usr/bin/docker")
+    get_runtime("docker").require_run()
+    assert ["docker", "info", "--format", "{{.OperatingSystem}}"] in calls
+
+
 def one_spec() -> ContainerSpec:
     return ContainerSpec(
         name="sanduk-x",

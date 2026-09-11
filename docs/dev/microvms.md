@@ -1,6 +1,6 @@
 # MicroVMs
 
-Status: investigated, 2026-09-10. `--oci-runtime` is implemented; Kata is not measured. Claims cite primary sources; inference is marked.
+Status: investigated, 2026-09-10. `--oci-runtime` is implemented; gVisor is measured, Kata is not. Claims cite primary sources; inference is marked.
 
 Scope: whether sanduk should run agents in microVMs, and how.
 
@@ -39,11 +39,13 @@ Docker picks the program that starts each container with `--runtime`. Two candid
 
 | | `open` | `sealed` | `/work` |
 | --- | --- | --- | --- |
-| gVisor | CI job `gvisor` | CI job `gvisor` | CI job `gvisor` |
+| gVisor | CI job `gvisor`; by hand | CI job `gvisor`; by hand | CI job `gvisor`; by hand |
 | Kata, Cloud Hypervisor or QEMU | no | no | no |
 | Kata, Firecracker | no | no | probably unsupported (inference, from Firecracker's device list) |
 
-The relay should work under both. Kata attaches its VM to the container's network namespace, which sits on the Docker bridge, and gVisor uses the same namespace. So the host gateway stays bindable and reachable. That is inference until the CI job passes; Kata is in `TODO.md`.
+The relay works under gVisor. On 2026-09-11 the container suite passed under runsc 20260831 on docker-ce 29.8.0, for hax and claude, including two concurrent `sealed` runs and a round trip through `/work`. gVisor uses the container's network namespace, which sits on the Docker bridge, so the host gateway stays bindable and reachable.
+
+Kata attaches its VM to the same namespace, so the relay should work there too. That is inference; Kata is in `TODO.md`.
 
 ## Alternative
 

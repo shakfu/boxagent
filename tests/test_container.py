@@ -26,7 +26,7 @@ from sanduk import assistants, proxy
 from sanduk.agent import get_agent
 from sanduk.errors import AgentboxError
 from sanduk.providers import OPENAI_CHAT, get_provider
-from sanduk.runtime import get_runtime, wait_for_gateway
+from sanduk.runtime import ContainerSpec, get_runtime, wait_for_gateway
 
 pytestmark = pytest.mark.container
 
@@ -99,6 +99,28 @@ def test_the_image_runs_its_agent():
     # Both streams: prime-agent prints its version on stderr, pi on stdout.
     printed = out.stdout + out.stderr
     assert re.search(VERSION_MARKER[AGENT.name][1], printed), printed
+
+
+def test_the_workdir_mount_carries_files_both_ways(tmp_path):
+    """sanduk's own argv, hardening included, against a real mount. The wakeup
+    tests cannot see a bad mount: their stub never has the agent write. Snap
+    Docker failed both halves: a private /tmp, and no exec under no-new-privileges."""
+    (tmp_path / "in.txt").write_text("from host\n")
+    spec = ContainerSpec(
+        name=f"sanduk-mount-{os.urandom(3).hex()}",
+        image=IMAGE,
+        mount=(tmp_path, "/work"),
+        entrypoint="sh",
+        command=["-c", "cat in.txt && echo from container > out.txt"],
+        oci_runtime=OCI_RUNTIME,
+    )
+    try:
+        r = subprocess.run(ENGINE.run_argv(spec), capture_output=True, text=True)
+    finally:
+        ENGINE.destroy(spec.name)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "from host\n"
+    assert (tmp_path / "out.txt").read_text() == "from container\n"
 
 
 def test_default_network_reaches_the_internet():

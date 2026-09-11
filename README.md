@@ -16,7 +16,7 @@ In its stronger mode the container has no route off the host and never holds the
 
   - Apple's [`container`](https://github.com/apple/container) 1.2.0 or later, which needs Apple silicon and macOS 26 or later
 
-  - `docker`, with a daemon on this kernel. `--proxy` needs the bridge gateway to be an address this host can bind, which Docker Desktop, Colima and Lima do not give.
+  - `docker`, with a daemon on this kernel. `--proxy` needs the bridge gateway to be an address this host can bind, which Docker Desktop, Colima and Lima do not give. Not the snap package: its confinement blocks every container sanduk starts, and `run` refuses it.
 
 - Python 3.11 or later. `uv` as well, for a source checkout: the Makefile targets run through it
 

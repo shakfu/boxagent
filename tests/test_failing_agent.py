@@ -105,6 +105,9 @@ class Engine:
     def require(self):
         pass
 
+    def require_run(self):
+        pass
+
     def image_exists(self, image):
         return True
 
@@ -177,6 +180,17 @@ def test_a_failed_run_still_records_its_cost_and_copies_its_report(
     found = json.loads(stats.read_text())
     assert found["exit"] == 1 and found["error"] == "rate limited"
     assert "10 in" in found["stats"]
+
+
+def test_the_stats_file_records_the_line_the_terminal_shows(
+    monkeypatch, work, tmp_path, capsys
+):
+    """The stand-in prices nothing and no relay counts, so neither reads $0.0000."""
+    stats = tmp_path / "stats.json"
+    code, _ = run_with(monkeypatch, work, agent(result()), "--stats-file", str(stats))
+    assert code == 0
+    assert json.loads(stats.read_text())["stats"].endswith(", cost unknown")
+    assert ", cost unknown" in capsys.readouterr().err
 
 
 def test_a_clean_exit_with_no_final_result_is_a_failure(monkeypatch, work, capsys):
