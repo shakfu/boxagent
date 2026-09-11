@@ -4,9 +4,24 @@
 
 sanduk is a Python CLI tool and package that makes it easy to run an agent inside a disposable container. The agent does its work, writes a report to a bind-mounted directory, and when it’s finished, the container is deleted.
 
-Seven agents ship: Claude Code, [codex](https://github.com/openai/codex), [hax](https://github.com/OleksandrChekhovskyi/hax), [hermes](https://github.com/NousResearch/hermes-agent), [opencode](https://github.com/sst/opencode), [pi](https://github.com/earendil-works/pi), and [prime-agent](https://github.com/PrimeIntellect-ai/prime-agent). Two container engines: Apple's [`container`](https://github.com/apple/container) on macOS, and `docker`. Each sits behind a registry -- an agent behind `sanduk.agent.Agent`, an engine behind `sanduk.runtime.Runtime` -- so another of either is one class. An agent can live in your own package and be found by entry point; see [docs/agents.md](docs/agents.md). Podman is not implemented.
+Seven agents are available: 
 
-Four providers are supported: Anthropic, OpenAI, OpenRouter, and any OpenAI-compatible server, which includes a local `llama-server`. See [Providers](#providers).
+- [claude code](https://claude.com/product/claude-code)
+- [codex](https://github.com/openai/codex) 
+- [hax](https://github.com/OleksandrChekhovskyi/hax) 
+- [hermes](https://github.com/NousResearch/hermes-agent) 
+- [opencode](https://github.com/sst/opencode) 
+- [pi](https://github.com/earendil-works/pi) 
+- [prime-agent](https://github.com/PrimeIntellect-ai/prime-agent)
+
+Two container engines are current supported:
+
+- [apple container](https://github.com/apple/container) on macOS
+- [docker](https://www.docker.com/)
+
+Each sits behind a registry -- an agent behind `sanduk.agent.Agent`, an engine behind `sanduk.runtime.Runtime` -- so another of either is one class. An agent can live in your own package and be found by entry point; see [docs/agents.md](docs/agents.md). Podman is not implemented.
+
+Four providers are supported: [Anthropic](https://www.anthropic.com/), [OpenAI](https://openai.com/), [OpenRouter](https://openrouter.ai/), and any OpenAI-compatible server, which includes a local `llama-server`. See [Providers](#providers).
 
 In its stronger mode the container has no route off the host and never holds the API key: a host-side relay injects the credential, and the container gets a per-run token that is worthless anywhere else. Against a local model there is no key to hold, and nothing leaves the machine at all.
 
