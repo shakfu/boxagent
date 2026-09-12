@@ -116,6 +116,13 @@ class Config:
         # crosses the line is paid for before the line is seen.
         self.budget = budget
         self.spent = 0.0
+        # Held across a budgeted call from the check to the accounting, so the
+        # ceiling is crossed by one call rather than by every call in flight.
+        self.gate = threading.Lock()
+        # Calls whose cost could not be read. Spending against a total that is
+        # known to be short is what `--budget` exists to prevent, so any is
+        # enough to stop the run.
+        self.unpriced = 0
         self.log_dir = log_dir
         self.body_seq = 0
         self.requests = 0
@@ -379,22 +386,74 @@ class Handler(BaseHTTPRequestHandler):
             pass
         return bytes(body)
 
+    def charge(self, sniffer: UsageSniffer, status: int, proto: Protocol | None) -> None:
+        """Record what this call cost, or record that it could not be read.
+
+        A response that owes a usage block and carries none used to count as
+        zero, which is indistinguishable from a free call and lets a run spend
+        past its ceiling without the total moving. It is counted as unpriced
+        instead, and the next call is refused rather than charged against a
+        figure known to be short.
+        """
+        cfg = self.cfg
+        field = cfg.provider.cost_field
+        if not field:
+            return
+        cost = sniffer.usage.get(field)
+        if cost is not None:
+            with cfg.lock:
+                cfg.spent += float(cost)
+        elif status < 400 and proto is not None:
+            # Only where one was owed: an error costs nothing, and a path
+            # admitted by --proxy-allow-path declares no protocol at all.
+            with cfg.lock:
+                cfg.unpriced += 1
+
     def relay(self) -> None:
         if not self.authorized():
             return
         cfg = self.cfg
-        if cfg.budget is not None and cfg.spent >= cfg.budget:
-            # Stop after crossing, not before: what the next call will cost is
-            # not knowable, and every estimate of it is wrong in one direction
-            # or the other. The ceiling is a line the run stops past, and the
-            # message says so rather than reading like arithmetic gone wrong.
-            self.refuse(
-                402,
-                f"over budget: ${cfg.spent:.4f} spent against a "
-                f"${cfg.budget:.4f} ceiling. The call that crossed it was "
-                f"already paid for",
-            )
+        if cfg.budget is None:
+            self.forward()
             return
+        # One budgeted call at a time, from the check through the accounting.
+        # Checking `spent` and updating it after the response completes bounds
+        # nothing on its own: every call in flight has already passed the check.
+        # An agent holding the run token can open as many as it likes, and five
+        # concurrent ones spent $2.00 against a $1.00 ceiling with none refused.
+        #
+        # Serialising is the only bound available here. Reserving credit up
+        # front would need a price for a call that has not been made, and the
+        # relay deliberately keeps no price table: it reads what the provider
+        # charged out of the response. The cost is that a budgeted run relays
+        # one call at a time, which is the trade `--budget` already implies.
+        with cfg.gate:
+            if cfg.unpriced:
+                self.refuse(
+                    402,
+                    f"{cfg.unpriced} call(s) reported no cost, so ${cfg.spent:.4f} "
+                    f"is a floor rather than a total and a ${cfg.budget:.4f} "
+                    f"ceiling cannot be enforced. Re-run without --budget to "
+                    f"continue",
+                )
+                return
+            if cfg.spent >= cfg.budget:
+                # Stop after crossing, not before: what the next call will cost
+                # is not knowable, and every estimate of it is wrong in one
+                # direction or the other. The ceiling is a line the run stops
+                # past, and the message says so rather than reading like
+                # arithmetic gone wrong.
+                self.refuse(
+                    402,
+                    f"over budget: ${cfg.spent:.4f} spent against a "
+                    f"${cfg.budget:.4f} ceiling. The call that crossed it was "
+                    f"already paid for",
+                )
+                return
+            self.forward()
+
+    def forward(self) -> None:
+        cfg = self.cfg
         started = time.monotonic()
 
         try:
@@ -458,6 +517,7 @@ class Handler(BaseHTTPRequestHandler):
             proto or ANTHROPIC,
         )
         sent = 0
+        gone = charged = False
         try:
             while True:
                 # read1, not read: read(n) blocks until n bytes arrive, which
@@ -465,22 +525,38 @@ class Handler(BaseHTTPRequestHandler):
                 chunk = resp.read1(65536)
                 if not chunk:
                     break
-                self.wfile.write(b"%x\r\n" % len(chunk) + chunk + b"\r\n")
-                self.wfile.flush()
                 sent += len(chunk)
                 sniffer.feed(chunk)
+                if gone:
+                    continue
+                try:
+                    self.wfile.write(b"%x\r\n" % len(chunk) + chunk + b"\r\n")
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    # Keep draining upstream rather than returning here. The
+                    # call is billed whether or not the client stayed to read
+                    # it, and what it cost arrives at the end of the stream:
+                    # leaving early recorded a real charge as zero.
+                    self.note("client hung up mid-stream; still reading the cost")
+                    self.close_connection = gone = True
             sniffer.close()
-            # Count before the client sees the end of the response: it may send
-            # the next request the moment it does, and a budget checked against
-            # a total that has not caught up would let that one through.
-            with cfg.lock:
-                cfg.spent += float(sniffer.usage.get(cfg.provider.cost_field or "", 0))
-            self.wfile.write(b"0\r\n\r\n")
-            self.wfile.flush()
+            # Before the client sees the end of the response: it may send the
+            # next request the moment it does, and a budget checked against a
+            # total that has not caught up would let that one through.
+            self.charge(sniffer, resp.status, proto)
+            charged = True
+            if not gone:
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             self.note("client hung up mid-stream")
         finally:
             conn.close()
+            if not charged:
+                # However this ended, the call was made and the provider
+                # billed it. Leaving on the exception recorded that as zero.
+                sniffer.close()
+                self.charge(sniffer, resp.status, proto)
 
         with cfg.lock:
             cfg.requests += 1

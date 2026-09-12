@@ -16,6 +16,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
   Only 129, 130 and 143 count. Both engines exit with the container's status, so an OOM-killed agent arrives as 137 and a segfault as 139; reading every code above 128 as a teardown would let an assistant that dies the same way each wakeup run forever without backing off.
 
+- `--budget` holds across concurrent calls. The relay checked `spent` before forwarding and updated it after the response completed, so every call already in flight had passed the same check: five at once billed $2.00 against a $1.00 ceiling with none refused. Budgeted calls now take the gate one at a time, from the check through the accounting. Reserving credit at admission would keep the parallelism, but it needs a price for a call that has not been made, and the relay keeps no price table -- it reads what the provider charged out of the response.
+
+- A relayed call whose client hangs up mid-stream is still counted. The accounting sat past the forwarding loop, so a broken pipe left a call the provider had billed recorded as zero. The relay now keeps draining upstream after the client goes, because the cost arrives at the end of the stream.
+
+- A response that owes a usage block and carries none stops a budgeted run instead of counting as free. Zero and unknown had the same effect on the total, so a run could spend past its ceiling without the figure moving.
+
 - An operator's `assistant disable` survives a wakeup already in flight. `schedule_next` computed the flag from the outcome alone, so a wakeup that then finished well re-enabled what the operator had just stopped. A set flag is preserved; failures can still set one.
 
 `scripts/sanduk.py` has the two report fixes.

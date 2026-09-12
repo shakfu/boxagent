@@ -964,19 +964,34 @@ def test_a_refused_request_closes_its_connection(relay):
 # --- cost budget ------------------------------------------------------------
 
 
-def costing(cost, path="/api/v1/chat/completions"):
-    """A fake OpenRouter that charges `cost` credits per call."""
+def costing(cost, path="/api/v1/chat/completions", dwell=0.0, usage=True):
+    """A fake OpenRouter that charges `cost` credits per call.
+
+    `dwell` holds each call open, which is the window a concurrent admission
+    would slip through. `usage=False` answers 200 with no usage block at all.
+    """
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         calls = 0
+        lock = threading.Lock()
 
         def log_message(self, *a):
             pass
 
         def do_POST(self):
             self.rfile.read(int(self.headers.get("Content-Length") or 0))
-            Handler.calls += 1
+            with Handler.lock:
+                Handler.calls += 1
+            time.sleep(dwell)
+            if not usage:
+                payload = b"{}"
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
             payload = json.dumps(
                 {"usage": {"prompt_tokens": 10, "completion_tokens": 2, "cost": cost}}
             ).encode()
@@ -992,8 +1007,8 @@ def costing(cost, path="/api/v1/chat/completions"):
     return srv, Handler, path
 
 
-def openrouter_relay(plaintext_upstream, budget=None, cost=0.4):
-    srv, handler, path = costing(cost)
+def openrouter_relay(plaintext_upstream, budget=None, cost=0.4, **kw):
+    srv, handler, path = costing(cost, **kw)
     relay, port = proxy.start_proxy(
         REAL_KEY,
         TOKEN,
@@ -1039,6 +1054,163 @@ def test_no_budget_counts_but_does_not_stop(plaintext_upstream):
             assert bearer_call(port, path, body=message())[0] == 200
         assert handler.calls == 3
         assert relay.cfg.spent == pytest.approx(27.0)
+    finally:
+        relay.shutdown()
+
+
+def test_concurrent_calls_do_not_walk_past_the_budget(plaintext_upstream):
+    """The ceiling is crossed by one call, not by every call in flight.
+
+    Checking `spent` and updating it after the response completes bounds
+    nothing on its own: an agent holding the run token can open as many
+    connections as it likes, and all of them pass the check together. Five
+    concurrent calls billed $2.00 against this $1.00 ceiling with none
+    refused.
+    """
+    relay, port, handler, path = openrouter_relay(
+        plaintext_upstream, budget=1.0, cost=0.4, dwell=0.3
+    )
+    codes, lock = [], threading.Lock()
+
+    def call():
+        status, _ = bearer_call(port, path, body=message())
+        with lock:
+            codes.append(status)
+
+    try:
+        threads = [threading.Thread(target=call) for _ in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        assert sorted(codes) == [200, 200, 200, 402, 402]
+        assert handler.calls == 3, "a call was billed after the ceiling was crossed"
+        assert relay.cfg.spent == pytest.approx(1.2)
+        assert relay.cfg.rejected == 2
+    finally:
+        relay.shutdown()
+
+
+def test_an_unbudgeted_relay_is_not_serialised(plaintext_upstream):
+    """Only a budget makes calls take turns; everything else stays parallel."""
+    relay, port, handler, path = openrouter_relay(plaintext_upstream, dwell=0.3)
+    try:
+        started = time.monotonic()
+        threads = [
+            threading.Thread(target=lambda: bearer_call(port, path, body=message()))
+            for _ in range(5)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        assert handler.calls == 5
+        # Serialised, five 0.3s calls take 1.5s. Concurrent, about 0.3s.
+        assert time.monotonic() - started < 1.0
+    finally:
+        relay.shutdown()
+
+
+def slow_stream(cost, path="/api/v1/chat/completions"):
+    """A fake OpenRouter that reports its cost early, then streams a long tail.
+
+    The window matters: the client has to go away *inside* the forwarding
+    loop, not at the terminator, which is where a short response ends.
+    """
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *a):
+            pass
+
+        def chunk(self, payload):
+            self.wfile.write(b"%x\r\n" % len(payload) + payload + b"\r\n")
+            self.wfile.flush()
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            usage = {"prompt_tokens": 10, "completion_tokens": 2, "cost": cost}
+            self.chunk(b"data: " + json.dumps({"usage": usage}).encode() + b"\n\n")
+            try:
+                for _ in range(20):
+                    time.sleep(0.02)
+                    self.chunk(b"data: " + b"x" * 4000 + b"\n\n")
+                self.chunk(b"")
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, Handler, path
+
+
+def test_a_call_the_client_abandons_is_still_counted(plaintext_upstream):
+    """The call is billed whether or not the client stayed to read it, and
+    what it cost arrives at the end of the stream. Returning at the broken
+    pipe recorded a real charge as zero."""
+    srv, _, path = slow_stream(0.4)
+    relay, port = proxy.start_proxy(
+        REAL_KEY,
+        TOKEN,
+        "127.0.0.1",
+        upstream=f"127.0.0.1:{srv.server_address[1]}",
+        provider=providers.get_provider("openrouter"),
+        budget=10.0,
+    )
+    try:
+        body = message()
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+        conn.request(
+            "POST",
+            path,
+            body=body,
+            headers={
+                "authorization": f"Bearer {TOKEN}",
+                "content-type": "application/json",
+            },
+        )
+        conn.getresponse().fp.read(64)  # the usage has arrived; the tail has not
+        conn.close()  # hang up inside the forwarding loop
+        deadline = time.monotonic() + 15
+        while relay.cfg.requests == 0 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert relay.cfg.spent == pytest.approx(0.4), "billed work went uncounted"
+    finally:
+        relay.shutdown()
+
+
+def test_a_response_with_no_cost_stops_the_run_rather_than_counting_zero(
+    plaintext_upstream,
+):
+    """Zero and unknown are not the same number. Counting a missing usage
+    block as zero let a run spend past its ceiling with the total unmoved."""
+    relay, port, handler, path = openrouter_relay(
+        plaintext_upstream, budget=1.0, usage=False
+    )
+    try:
+        assert bearer_call(port, path, body=message())[0] == 200
+        assert relay.cfg.spent == 0.0 and relay.cfg.unpriced == 1
+        status, refusal = bearer_call(port, path, body=message())
+        assert status == 402
+        assert "no cost" in json.loads(refusal)["error"]["message"]
+        assert handler.calls == 1, "a second call was billed against an unknown total"
+    finally:
+        relay.shutdown()
+
+
+def test_an_upstream_error_is_not_counted_as_unpriced(plaintext_upstream):
+    """A refused call costs nothing, so it owes no usage block."""
+    relay, port, _, path = openrouter_relay(plaintext_upstream, budget=1.0)
+    try:
+        assert bearer_call(port, "/api/v1/nope", body=message())[0] == 403
+        assert relay.cfg.unpriced == 0
+        assert bearer_call(port, path, body=message())[0] == 200
     finally:
         relay.shutdown()
 
