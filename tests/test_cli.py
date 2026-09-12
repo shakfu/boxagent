@@ -6,6 +6,7 @@ Every run here is a --dry-run: nothing is built and nothing is started.
 
 import argparse
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -89,11 +90,60 @@ def test_dry_run_does_not_write_a_task_file(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_stale_report_is_removed_before_a_run(tmp_path):
+def test_dry_run_leaves_an_existing_report_alone(tmp_path):
+    """It prints an argv and starts nothing, so it must destroy nothing: the
+    previous report is still the only result there is."""
     stale = tmp_path / REPORT_NAME
     stale.write_text("from a previous run")
-    main(["run", "summarise", "-w", str(tmp_path), "--dry-run"])
+    assert main(["run", "summarise", "-w", str(tmp_path), "--dry-run"]) == 0
+    assert stale.read_text() == "from a previous run"
+
+
+def test_a_rejected_key_leaves_an_existing_report_alone(tmp_path, monkeypatch):
+    """The preflight refuses before a container starts. Nothing ran, so the
+    previous result is the current one."""
+
+    def refuse(*a, **kw):
+        raise AgentboxError("that key was rejected")
+
+    monkeypatch.setattr("sanduk.cli.validate_key", refuse)
+    stale = tmp_path / REPORT_NAME
+    stale.write_text("from a previous run")
+    assert main(["run", "summarise", "-w", str(tmp_path)]) == 2
+    assert stale.read_text() == "from a previous run"
+
+
+def test_a_real_run_removes_the_stale_report_before_starting(tmp_path, monkeypatch):
+    """Otherwise a run whose agent writes nothing reports the last one's answer."""
+    stale = tmp_path / REPORT_NAME
+    stale.write_text("from a previous run")
+    seen = {}
+
+    class Engine(StubEngine):
+        def run_argv(self, spec):
+            seen["report"] = stale.exists()
+            return ["stub", "run", spec.image]
+
+    monkeypatch.setattr("sanduk.cli.get_runtime", lambda _: Engine())
+    monkeypatch.setattr("sanduk.cli.launch", lambda *a, **kw: (None, 0))
+    argv = ["run", "summarise", "-w", str(tmp_path), "--skip-key-check"]
+    assert main(argv) != 0
     assert not stale.exists()
+
+
+def test_a_stale_report_symlink_is_removed_too(tmp_path, monkeypatch):
+    """exists() resolves, so a dangling link the last agent left survived and
+    shadowed the next run's report."""
+    (tmp_path / REPORT_NAME).symlink_to(tmp_path / "gone")
+
+    class Engine(StubEngine):
+        def run_argv(self, spec):
+            return ["stub", "run", spec.image]
+
+    monkeypatch.setattr("sanduk.cli.get_runtime", lambda _: Engine())
+    monkeypatch.setattr("sanduk.cli.launch", lambda *a, **kw: (None, 0))
+    main(["run", "summarise", "-w", str(tmp_path), "--skip-key-check"])
+    assert not (tmp_path / REPORT_NAME).is_symlink()
 
 
 def test_boxagent_error_carries_its_own_exit_code():
@@ -532,6 +582,96 @@ def test_runs_says_why_a_wakeup_failed(assistant_dir, capsys):
     )
     assert main(["runs"]) == 0
     assert "agent exceeded --timeout 120s" in capsys.readouterr().out
+
+
+# --- reports the agent controls ---------------------------------------------
+#
+# REPORT.md is written inside the mount, so its name, its type and its target
+# are all the agent's to choose. Everything here is about the host reading it.
+
+
+def test_a_report_symlink_is_not_followed_out_of_the_mount(tmp_path, capsys):
+    """The agent cannot reach a host path from inside the container, but a
+    symlink at REPORT.md names one for this process to resolve."""
+    secret = tmp_path / "host-only.txt"
+    secret.write_text("not in the mount")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / REPORT_NAME).symlink_to(secret)
+    out = tmp_path / "out.md"
+
+    args = argparse.Namespace(report=out, stats_file=None)
+    outcome = Outcome(ok=True, text="", error="", stats="")
+    assert _collect_report(args, work, outcome, 0) == 0
+    assert not out.exists()
+    assert "refusing" in capsys.readouterr().err
+
+
+def test_a_report_that_is_not_a_regular_file_is_refused(tmp_path, capsys):
+    work = tmp_path / "work"
+    work.mkdir()
+    os.mkfifo(work / REPORT_NAME)
+    args = argparse.Namespace(report=tmp_path / "out.md", stats_file=None)
+    assert _collect_report(args, work, None, 1) == 1
+    assert "not a regular file" in capsys.readouterr().err
+
+
+def test_a_symlinked_report_is_not_named_in_the_stats_file(tmp_path):
+    """An assistant reads this field to find what to put in the outbox."""
+    work = tmp_path / "work"
+    work.mkdir()
+    secret = tmp_path / "host-only.txt"
+    secret.write_text("not in the mount")
+    (work / REPORT_NAME).symlink_to(secret)
+    stats = tmp_path / "stats.json"
+    args = argparse.Namespace(report=None, stats_file=stats)
+    _collect_report(args, work, None, 1)
+    assert json.loads(stats.read_text())["report"] is None
+
+
+def test_the_copy_does_not_follow_a_symlink_at_the_destination(tmp_path):
+    """An assistant's reports directory can itself be inside a mount, which
+    puts the same planted symlink on the far end of the copy."""
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / REPORT_NAME).write_text("the agent's answer")
+    target = tmp_path / "host-only.txt"
+    target.write_text("untouched")
+    dest = tmp_path / "out.md"
+    dest.symlink_to(target)
+
+    args = argparse.Namespace(report=dest, stats_file=None)
+    outcome = Outcome(ok=True, text="", error="", stats="")
+    # Refused rather than skipped: -o is what the caller reads, and a silent
+    # skip leaves whatever a previous run put there to be read as this one's.
+    with pytest.raises(AgentboxError):
+        _collect_report(args, work, outcome, 0)
+    assert target.read_text() == "untouched"
+
+
+def test_an_ordinary_report_is_still_copied(tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / REPORT_NAME).write_text("the agent's answer")
+    out = tmp_path / "out.md"
+    args = argparse.Namespace(report=out, stats_file=None)
+    outcome = Outcome(ok=True, text="", error="", stats="")
+    assert _collect_report(args, work, outcome, 0) == 0
+    assert out.read_text() == "the agent's answer"
+
+
+def test_a_copy_truncates_whatever_was_at_the_destination(tmp_path):
+    """-o names a fixed path across runs, so a shorter report must not leave
+    the tail of a longer one behind it."""
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / REPORT_NAME).write_text("short")
+    out = tmp_path / "out.md"
+    out.write_text("a much longer previous report")
+    args = argparse.Namespace(report=out, stats_file=None)
+    outcome = Outcome(ok=True, text="", error="", stats="")
+    _collect_report(args, work, outcome, 0)
+    assert out.read_text() == "short"
 
 
 def test_the_stats_file_records_what_a_run_cost(tmp_path):

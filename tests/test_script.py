@@ -9,6 +9,7 @@ still builds, just not the image the package builds.
 
 import ast
 import importlib.util
+import os
 import pathlib
 
 import pytest
@@ -171,3 +172,64 @@ def test_the_relay_is_still_compared_behaviourally():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert set(module.RELAYS) == {"package", "script"}
+
+
+# --- the report path, compared behaviourally -------------------------------
+#
+# The script's copy is inline in its run(), so there is no shared name for
+# test_shared_logic_has_not_drifted to compare. What matters is that the
+# containment holds in both copies, which is a behaviour, not a syntax.
+
+
+def _script():
+    """Import scripts/sanduk.py. Nothing runs at import: main() is guarded."""
+    spec = importlib.util.spec_from_file_location("sanduk_script_report", SCRIPT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.skipif(not SCRIPT.is_file(), reason="scripts/ is not in this tree")
+def test_the_script_does_not_follow_a_report_symlink(tmp_path):
+    """Same containment as the package: a symlink at REPORT.md names a host
+    path the container could not reach."""
+    script = _script()
+    secret = tmp_path / "host-only.txt"
+    secret.write_text("not in the mount")
+    report = tmp_path / "REPORT.md"
+    report.symlink_to(secret)
+    assert script.open_report(report) is None
+
+
+@pytest.mark.skipif(not SCRIPT.is_file(), reason="scripts/ is not in this tree")
+def test_the_script_reads_an_ordinary_report(tmp_path):
+    script = _script()
+    report = tmp_path / "REPORT.md"
+    report.write_text("the agent's answer")
+    fd = script.open_report(report)
+    assert fd is not None
+    try:
+        out = tmp_path / "out.md"
+        script.copy_report(fd, out)
+        assert out.read_text() == "the agent's answer"
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.skipif(not SCRIPT.is_file(), reason="scripts/ is not in this tree")
+def test_the_script_does_not_write_through_a_destination_symlink(tmp_path):
+    script = _script()
+    report = tmp_path / "REPORT.md"
+    report.write_text("the agent's answer")
+    target = tmp_path / "host-only.txt"
+    target.write_text("untouched")
+    dest = tmp_path / "out.md"
+    dest.symlink_to(target)
+    fd = script.open_report(report)
+    try:
+        with pytest.raises(SystemExit):
+            script.copy_report(fd, dest)
+    finally:
+        os.close(fd)
+    assert target.read_text() == "untouched"

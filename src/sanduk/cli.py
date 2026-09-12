@@ -65,7 +65,7 @@ from sanduk.runtime import (
     get_runtime,
     wait_for_gateway,
 )
-from sanduk.util import note, seconds
+from sanduk.util import copy_unfollowed, note, open_unfollowed, seconds
 
 COMMANDS = (
     "run",
@@ -858,10 +858,6 @@ def run(args: argparse.Namespace) -> int:
         raise AgentboxError(f"{provider.key_env} is not set. export it, then re-run.")
 
     workdir = args.workdir.resolve()
-    workdir.mkdir(parents=True, exist_ok=True)
-    stale = workdir / REPORT_NAME
-    if stale.exists():
-        stale.unlink()
 
     if not args.dry_run and not args.skip_key_check:
         # Before anything is started, so a bad key cannot leak a container.
@@ -929,6 +925,13 @@ def run(args: argparse.Namespace) -> int:
         return 0
 
     runtime.require_run()
+    # Not before the dry-run return above, and not before the key check: until
+    # a run is about to start, the previous report is still the only result
+    # there is, and a command that only prints its argv must not destroy it.
+    workdir.mkdir(parents=True, exist_ok=True)
+    # unlink, not exists() then unlink: exists() resolves, so a symlink the
+    # last agent left would survive to shadow this run's report.
+    (workdir / REPORT_NAME).unlink(missing_ok=True)
     sweep()
     if args.rebuild or not runtime.image_exists(sel.image):
         runtime.build_image(sel.image, sel.containerfile)
@@ -1055,31 +1058,35 @@ def _collect_report(
     else:
         error, code = "", rc
     report = workdir / REPORT_NAME
-    if args.stats_file:
-        # The exit code is all a caller gets from `main`, and the token line is
-        # printed rather than returned. An assistant recording what a wakeup
-        # cost needs it as data.
-        args.stats_file.write_text(
-            json.dumps(
-                {
-                    "exit": code,
-                    "ok": bool(outcome and outcome.ok),
-                    "stats": outcome.stats if outcome else "",
-                    "error": error,
-                    "report": str(args.report or report) if report.is_file() else None,
-                }
+    fd = open_unfollowed(report)
+    try:
+        if args.stats_file:
+            # The exit code is all a caller gets from `main`, and the token line
+            # is printed rather than returned. An assistant recording what a
+            # wakeup cost needs it as data.
+            args.stats_file.write_text(
+                json.dumps(
+                    {
+                        "exit": code,
+                        "ok": bool(outcome and outcome.ok),
+                        "stats": outcome.stats if outcome else "",
+                        "error": error,
+                        "report": str(args.report or report) if fd is not None else None,
+                    }
+                )
             )
-        )
-    if report.is_file():
-        if args.report:
-            shutil.copy(report, args.report)
+        if fd is None:
+            note(f"the agent wrote no {REPORT_NAME}")
+            if outcome and outcome.text:
+                print(f"\n{outcome.text}")
+        elif args.report:
+            copy_unfollowed(fd, args.report)
             note(f"report -> {args.report}")
         else:
             note(f"report -> {report}")
-    else:
-        note(f"the agent wrote no {REPORT_NAME}")
-        if outcome and outcome.text:
-            print(f"\n{outcome.text}")
+    finally:
+        if fd is not None:
+            os.close(fd)
     return code
 
 

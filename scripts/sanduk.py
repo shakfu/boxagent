@@ -28,6 +28,7 @@ import secrets
 import shlex
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -462,6 +463,43 @@ def start_proxy(
 def die(msg, code=2):
     print(f"sanduk: {msg}", file=sys.stderr)
     raise SystemExit(code)
+
+
+def open_report(report):
+    """The agent's report as a descriptor, or None if it wrote no ordinary file.
+
+    The agent owns the mount, so a symlink it leaves at REPORT.md names a path
+    this process resolves against the host root and the container could not
+    reach at all. O_NOFOLLOW rather than an is_symlink() test, which the agent
+    can swap between the test and the open; O_NONBLOCK because a fifo at that
+    name blocks the open until something writes to it.
+    """
+    try:
+        fd = os.open(report, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        if report.is_symlink():
+            print(
+                f"sanduk: refusing {REPORT_NAME}: a symlink to {os.readlink(report)}",
+                file=sys.stderr,
+            )
+        return None
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        print(f"sanduk: refusing {REPORT_NAME}: not a regular file", file=sys.stderr)
+        return None
+    return fd
+
+
+def copy_report(fd, dest):
+    """Copy an already-opened report to `dest`, following no symlink there."""
+    try:
+        out = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    except OSError as e:
+        die(f"cannot write the report to {dest}: {e}")
+    with os.fdopen(out, "wb") as fh:
+        os.lseek(fd, 0, os.SEEK_SET)
+        while chunk := os.read(fd, 1 << 16):
+            fh.write(chunk)
 
 
 def run(cmd, **kw):
@@ -965,10 +1003,6 @@ def main(argv=None):
         die(f"{KEY_ENV} is not set. export it, then re-run.")
 
     workdir = args.workdir.resolve()
-    workdir.mkdir(parents=True, exist_ok=True)
-    stale = workdir / REPORT_NAME
-    if stale.exists():
-        stale.unlink()
 
     if not args.dry_run and not args.skip_key_check:
         # Before anything is started, so a bad key cannot leak a container.
@@ -1033,6 +1067,12 @@ def main(argv=None):
         return 0
 
     require_container_cli()
+    # Not before the dry-run return above, and not before the key check: until
+    # a run is about to start, the previous report is still the only result
+    # there is. unlink rather than exists() then unlink, because exists()
+    # resolves and a symlink the last agent left would survive.
+    workdir.mkdir(parents=True, exist_ok=True)
+    (workdir / REPORT_NAME).unlink(missing_ok=True)
     if args.rebuild or not image_exists(args.image):
         build_image(args.image, args.containerfile)
 
@@ -1095,14 +1135,18 @@ def main(argv=None):
         )
         code = 1
 
-    if report.is_file():
-        if args.report:
-            shutil.copy(report, args.report)
-            print(f"sanduk: report -> {args.report}", file=sys.stderr)
-        else:
-            print(f"sanduk: report -> {report}", file=sys.stderr)
-    else:
+    fd = open_report(report)
+    if fd is None:
         print(f"sanduk: the agent wrote no {REPORT_NAME}", file=sys.stderr)
+    elif args.report:
+        try:
+            copy_report(fd, args.report)
+        finally:
+            os.close(fd)
+        print(f"sanduk: report -> {args.report}", file=sys.stderr)
+    else:
+        os.close(fd)
+        print(f"sanduk: report -> {report}", file=sys.stderr)
         if result and result.get("result") and not result.get("is_error"):
             print(f"\n{result['result']}")
     return code

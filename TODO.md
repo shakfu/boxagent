@@ -10,6 +10,18 @@ Ordered by how much they would change a decision, not by effort.
 
 ## Correctness
 
+- **`--budget` does not hold across concurrent calls.** The relay checks `spent` before forwarding and updates it only after a response completes, so any number of calls pass while earlier ones are in flight. Five concurrent calls billed $2.00 against a $1.00 ceiling with nothing rejected, against a README that promises the ceiling is crossed by exactly one call. A client that hangs up mid-stream skips the accounting block, so billed work goes uncounted. Three decisions, not one: admission, the disconnect path, and what a response carrying no usage block means for further admission -- currently a silent zero. Serializing budgeted calls keeps the documented guarantee and throttles a parallel agent to one call at a time; reserving `--max-tokens-cap` worth of credit at admission keeps concurrency and bounds the overrun by the number in flight instead.
+
+- **`--log-dir` is not checked against being inside the bind mount.** The default `./sanduk-logs` lands in `/work` under `-w .`, which hands the agent its own audit trail, and `--help` claims the opposite unconditionally. Body files are created with an ordinary `open(..., "wb")`, so a predictable future log name can also be pointed at a host path through a symlink. Resolve the directory against the workspace and every read-write `--mount`, and create entries `O_EXCL|O_NOFOLLOW`.
+
+- **`sweep()` discards ownership when the engine is merely unreachable.** Both engines return an empty container list when their list command fails, so a stopped daemon looks like an engine with no containers and the records naming real ones are deleted. Reproduced with docker installed and its daemon down; the missing-binary case is already handled. `Runtime.destroy()` only logs a failed delete, and ordinary teardown releases its record without confirming the container is gone. In `--mode open` the container holds the real key, so one that is never reaped holds a credential for as long as it exists.
+
+- **Concurrent wakeups share one stats file.** Every wakeup writes `$XDG_STATE_HOME/sanduk/wakeup.json`, deleting it before the run and after reading it. Claims are per assistant, so two scheduler processes running different assistants collide: one deletes another's stats, reads its token totals, or has its result recorded against the wrong name. The documented cron entry runs `tick` every 10 minutes against a 900s default timeout, so overlapping passes are the default shape. Key the path on the database run id.
+
+- **The relay and holder are acquired outside the lifecycle cleanup block.** Both start before the `try/finally` around `launch()`, so a failure in mount validation, log-directory creation or relay binding leaves a holder container running and a relay listening. Mounts are validated only while building the container command, after all of it. `log_dir.mkdir` and the bind raise `OSError`, which is not `AgentboxError`, so it escapes `main()` past `tick` and `serve` and kills a long-lived scheduler outright. Validate static options first, then enclose every acquisition in one scope.
+
+- **Nothing checks that a network is actually internal.** `ensure_network` accepts any existing network with a gateway and subnet, and neither runtime's `network_info` returns the `internal` flag. A routable network left by a `key-safe` run is reused by a `sealed` run through the same `--proxy-network` name, and the CLI then prints "no route off the host" having checked nothing. Operator-triggered rather than agent-triggered, which is why it sits below the rest; the false assertion is the defect. Verifying a fix needs a real engine, so it lands in CI rather than `make test`.
+
 - **Each provider's route table is the paths one workload was seen to use.** A different task (web search, subagents, MCP) may call something else and get a 403. The failure is legible in the proxy log, but the fix is manual: `--proxy-allow-path`.
 
 - **OpenAI's `/v1/responses` has not been checked against a real response.** codex speaks it, but the cap field and usage names come from the documentation.
@@ -22,9 +34,9 @@ Ordered by how much they would change a decision, not by effort.
 
 - **The firewall preflight only detects an explicit Block entry.** An interpreter that would merely prompt is not caught, and the symptom is identical: a hang.
 
-- **`--log-dir` is not checked against being inside the bind mount**, which would hand the agent its own audit trail.
-
 - **A timed-out run records no token count.** The reader's partial tally is discarded with the kill.
+
+- **The README contradicts itself on CI.** One section describes `.github/workflows/ci.yml`; a later one says there is no CI. `providers.py` still opens "Only Anthropic is implemented" above four `Provider` rows.
 
 ## Design
 

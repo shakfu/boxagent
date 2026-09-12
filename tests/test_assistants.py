@@ -7,6 +7,7 @@ nothing a typed `sanduk run` cannot.
 
 import json
 import os
+import pathlib
 import signal
 import sqlite3
 
@@ -443,6 +444,95 @@ def test_an_interrupted_wakeup_is_not_a_failure(db, registered, monkeypatch):
     assert len(assistants.pending(db, "triage")) == 1
 
 
+SIGTERM_EXIT = 128 + signal.SIGTERM
+
+
+def test_teardown_exits_are_the_ones_run_can_produce():
+    """The set is derived here and produced there; nothing links the two."""
+    from sanduk import cli
+
+    for signum in cli.TEARDOWN_SIGNALS:
+        assert 128 + signum in assistants.TEARDOWN_EXITS
+    # SIGINT does not go through that handler: it arrives as KeyboardInterrupt
+    # and `run` turns it into 130.
+    assert 128 + signal.SIGINT in assistants.TEARDOWN_EXITS
+
+
+@pytest.mark.parametrize(
+    "code, why",
+    [
+        (128 + signal.SIGKILL, "the kernel OOM-killed the container"),
+        (128 + signal.SIGSEGV, "the agent segfaulted"),
+        (128 + signal.SIGABRT, "the agent aborted"),
+    ],
+)
+def test_a_container_killed_by_a_signal_is_still_a_failure(
+    db, registered, monkeypatch, code, why
+):
+    """Both engines exit with the container's status, so a death inside it
+    arrives above 128 too. Counting every such code as an interruption let a
+    wakeup that dies the same way every time run forever."""
+    monkeypatch.setattr("sanduk.cli.main", lambda argv: code)
+    assistants.wake(db, registered)
+    assert assistants.row(db, "triage")["failures"] == 1, why
+
+
+def test_a_sigterm_wakeup_is_not_counted_as_a_failure(db, registered, monkeypatch):
+    """`run` exits 128 + N, so SIGTERM is 143 and SIGINT 130. Counting only 130
+    made `systemctl stop` look like a broken assistant."""
+    monkeypatch.setattr("sanduk.cli.main", lambda argv: SIGTERM_EXIT)
+    assert assistants.wake(db, registered) == SIGTERM_EXIT
+    found = assistants.row(db, "triage")
+    assert found["failures"] == 0 and not found["disabled"]
+
+
+def test_a_sigterm_wakeup_stops_serve(db, registered, monkeypatch):
+    """The signal reached `run`, which took it: the loop learns from the code."""
+    passes = []
+    monkeypatch.setattr(
+        assistants,
+        "tick",
+        lambda db_, name=None, runtime=None: passes.append(1) or SIGTERM_EXIT,
+    )
+    assert assistants.serve(db, interval=60) == 0
+    assert len(passes) == 1
+
+
+def test_an_interrupted_wakeup_skips_the_rest_of_the_pass(db, home, monkeypatch):
+    """The signal was meant for the process, not for the one wakeup that got it."""
+    second = home.parent / "second"
+    second.mkdir()
+    (second / "assistant.toml").write_text(CONFIG.replace('"triage"', '"second"'))
+    (second / "brief.md").write_text("Something else.")
+    for d in (home, second):
+        assistants.register(db, assistants.load(d))
+
+    woken = []
+
+    def fake(argv):
+        woken.append(argv[argv.index("--stats-file") - 1])
+        return SIGTERM_EXIT
+
+    monkeypatch.setattr("sanduk.cli.main", fake)
+    assert assistants.tick(db) == SIGTERM_EXIT
+    assert len(woken) == 1, "the second assistant was woken after a signal"
+
+
+def test_an_operator_disable_survives_a_wakeup_that_finishes(db, registered, ran):
+    """`assistant disable` during a wakeup says stop. A wakeup that then
+    finished well used to answer by scheduling itself again."""
+    assistants.set_disabled(db, "triage", True)
+    assistants.schedule_next(db, registered, ok=True)
+    assert assistants.row(db, "triage")["disabled"] == 1
+
+
+def test_an_enabled_assistant_is_still_disabled_by_its_failures(db, registered):
+    """The operator's flag is preserved, not made the only way to set one."""
+    for _ in range(registered.max_failures):
+        assistants.schedule_next(db, registered, ok=False)
+    assert assistants.row(db, "triage")["disabled"] == 1
+
+
 def test_a_run_that_recorded_no_stats_leaves_the_column_empty(
     db, registered, monkeypatch
 ):
@@ -462,6 +552,26 @@ def failing_with(error):
         return 124
 
     return fake
+
+
+def test_the_outbox_does_not_read_through_a_report_symlink(
+    db, registered, monkeypatch, tmp_path
+):
+    """`run` refuses to write the report through a symlink; reading one here
+    would put back exactly the file that refusal withheld. Reachable when the
+    reports directory is itself inside a mount."""
+    secret = tmp_path / "host-only.txt"
+    secret.write_text("a key, say")
+
+    def plant(argv):
+        pathlib.Path(argv[argv.index("-o") + 1]).symlink_to(secret)
+        return 0
+
+    monkeypatch.setattr("sanduk.cli.main", plant)
+    assistants.wake(db, registered)
+    body = assistants.outbox(db)[0]["body"]
+    assert "a key, say" not in body
+    assert body.startswith("(no report")
 
 
 def test_a_wakeup_records_why_it_failed(db, registered, monkeypatch):

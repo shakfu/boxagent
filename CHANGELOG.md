@@ -4,6 +4,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The host no longer resolves a symlink left at `REPORT.md`. The agent owns the mount, so a link there names a path the host walks and the container cannot reach -- a key, anything above the workspace. `shutil.copy` and `is_file()` both followed it, and with `-o` the target's contents reached the destination. The report is opened `O_NOFOLLOW` and `fstat`-ed for a regular file, rather than tested with `is_symlink()` first, which leaves the swap between test and open.
+
+  Both ends of the copy need the guard, and so does the read back: an assistant loaded its outbox with `read_text`, so refusing the write and then following the link on the way in withheld nothing. Its reports directory is outside the mount by default, not by construction. The open also passes `O_NONBLOCK`, because a fifo at that name blocked it until something wrote, and the container that would have is deleted by then.
+
+- `--dry-run` no longer deletes the previous `REPORT.md`, and neither does a run the key preflight rejects. Both removed it while resolving the workspace, before anything knew whether a container would start, so a command that only prints its argv destroyed the last run's result. Removal now happens once the engine has answered. It also clears a symlink at that name, which `exists()` resolved and so kept.
+
+- A wakeup torn down by SIGTERM no longer counts as a failure, and stops `serve`. `run` exits 128 plus the signal number, so SIGTERM is 143 and SIGHUP 129, while the scheduler recognised only SIGINT's 130: `systemctl stop` backed the assistant off and kept serving. `tick` now ends its pass there as well, rather than waking the next assistant with the signal already delivered.
+
+  Only 129, 130 and 143 count. Both engines exit with the container's status, so an OOM-killed agent arrives as 137 and a segfault as 139; reading every code above 128 as a teardown would let an assistant that dies the same way each wakeup run forever without backing off.
+
+- An operator's `assistant disable` survives a wakeup already in flight. `schedule_next` computed the flag from the outcome alone, so a wakeup that then finished well re-enabled what the operator had just stopped. A set flag is preserved; failures can still set one.
+
+`scripts/sanduk.py` has the two report fixes.
+
 ## [0.2.4]
 
 ### Added

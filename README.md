@@ -265,7 +265,7 @@ sanduk runs                                wakeup history with exit codes
 */10 * * * * cd ~/assistants && /opt/homebrew/bin/uv run sanduk tick
 ```
 
-`serve` is the same pass on a loop, in the foreground, for when you would rather run one process than a cron entry -- under launchd, systemd, or a terminal. It sleeps until the next assistant is due, capped at `--interval`, and holds no container and no credential in between: it is a timer. SIGINT or SIGTERM stops it after the pass in flight; a signal during a wakeup tears that wakeup down first, and the interrupted wakeup does not count against the assistant's failures.
+`serve` is the same pass on a loop, in the foreground, for when you would rather run one process than a cron entry -- under launchd, systemd, or a terminal. It sleeps until the next assistant is due, capped at `--interval`, and holds no container and no credential in between: it is a timer. SIGINT or SIGTERM between wakeups stops it after the pass in flight. A signal during a wakeup tears that wakeup down first and ends the pass there, rather than waking the next assistant with the signal already delivered; the interrupted wakeup does not count against the assistant's failures.
 
 A wakeup is one `sanduk run`: the brief plus any queued messages become the task, `workspace/` is the bind mount, and the report is copied to `reports/<timestamp>.md`. The container is deleted at the end like any other run, and the relay holds the key for exactly as long as the wakeup lasts.
 

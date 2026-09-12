@@ -30,16 +30,34 @@ from typing import cast
 
 from sanduk.errors import AgentboxError
 from sanduk.runs import owner_alive
-from sanduk.util import note, seconds, state_dir
+from sanduk.util import note, read_unfollowed, seconds, state_dir
 
 CONFIG_NAME = "assistant.toml"
 DEFAULT_EVERY = "30m"
 # A failing assistant backs off per consecutive failure, to this ceiling. Past
 # it the wakeups are neither useful nor free.
 MAX_BACKOFF = 24 * 3600
-# What `run` exits with when a signal tore it down. An interrupted wakeup is not
-# a broken assistant, so it is not counted as a failure.
+# What `run` exits with when a signal tore it down: the shell's 128 + N, so
+# SIGINT is 130, SIGTERM 143 and SIGHUP 129. An interrupted wakeup is not a
+# broken assistant, so it is not counted as a failure. 130 alone missed the
+# signal systemd and `kill` actually send.
 INTERRUPTED = 130
+
+
+# Exactly what `run` exits with when a signal reached *this* process: SIGINT
+# through KeyboardInterrupt, SIGTERM and SIGHUP through its teardown handler.
+# Not every code above 128: both engines exit with the container's status, so
+# an agent the kernel OOM-killed arrives as 137 and a segfault as 139. Those
+# are the assistant's own failures and must still count as ones.
+TEARDOWN_EXITS = frozenset(
+    128 + s for s in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
+)
+
+
+def interrupted(code: int) -> bool:
+    """Whether a signal to this process ended the wakeup, rather than the agent."""
+    return code in TEARDOWN_EXITS
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS assistants (
@@ -509,7 +527,12 @@ def wake(db: sqlite3.Connection, assistant: Assistant, runtime: str | None = Non
         (now(), code, stats, error, run_id),
     )
     why = f": {error}" if error else ""
-    body = report.read_text() if report.is_file() else f"(no report, exit {code}{why})"
+    # read_unfollowed, not read_text: `run` refuses to write the report
+    # through a symlink, and reading one here would put back the file that
+    # refusal withheld. An assistant's reports directory is only outside the
+    # mount by default, not by construction.
+    written = read_unfollowed(report)
+    body = written if written is not None else f"(no report, exit {code}{why})"
     db.execute(
         "INSERT INTO outbox (name, run_id, created_at, body, approved_at) "
         "VALUES (?, ?, ?, ?, ?)",
@@ -521,7 +544,7 @@ def wake(db: sqlite3.Connection, assistant: Assistant, runtime: str | None = Non
         # Only a wakeup that finished consumes its messages: a failed one has
         # not answered them, and the next wakeup should still see them.
         consume(db, [int(i["id"]) for i in items])
-    schedule_next(db, assistant, ok=code in (0, INTERRUPTED))
+    schedule_next(db, assistant, ok=code == 0 or interrupted(code))
     return code
 
 
@@ -540,10 +563,16 @@ def read_stats(path: Path) -> tuple[str | None, str | None]:
 
 def schedule_next(db: sqlite3.Connection, assistant: Assistant, ok: bool) -> None:
     name = assistant.name
-    failures = 0 if ok else int(row(db, name)["failures"]) + 1
+    current = row(db, name)
+    failures = 0 if ok else int(current["failures"]) + 1
     delay = assistant.every if ok else min(assistant.every * 2**failures, MAX_BACKOFF)
     disabled = 0 if ok else int(failures >= assistant.max_failures)
-    if disabled:
+    # Re-read rather than compute from the outcome alone: an operator who ran
+    # `assistant disable` while this wakeup was in flight said stop, and a
+    # wakeup that then finished well would have answered by starting again.
+    if int(current["disabled"]):
+        disabled = 1
+    elif disabled:
         note(
             f"{name}: disabled after {failures} failures. "
             f"Fix it, then `sanduk assistant enable {name}`"
@@ -572,9 +601,15 @@ def tick(
             continue
         try:
             note(f"{assistant.name}: waking")
-            worst = max(worst, wake(db, assistant, runtime))
+            code = wake(db, assistant, runtime)
+            worst = max(worst, code)
         finally:
             release(db, assistant.name)
+        if interrupted(code):
+            # The signal was meant for this process, not for that one wakeup:
+            # starting the next assistant would ignore it.
+            note("interrupted; the rest of this pass is skipped")
+            break
     return worst
 
 
@@ -614,7 +649,7 @@ def serve(db: sqlite3.Connection, interval: int = 60, runtime: str | None = None
             # A wakeup that a signal tore down took the signal with it: `run`
             # installs its own handlers while it holds a container, so this
             # loop learns about it from the exit code rather than from `halt`.
-            if tick(db, runtime=runtime) == INTERRUPTED:
+            if interrupted(tick(db, runtime=runtime)):
                 break
             if stopping.is_set():
                 break
